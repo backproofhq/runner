@@ -1,0 +1,10 @@
+# internal implementation plans, research notes etc.
+.plans/
+
+# GoReleaser output
+dist/
+
+# Local secrets
+.env*
+runner.env
+sources.env
