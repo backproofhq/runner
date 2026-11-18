@@ -4,9 +4,11 @@ package config
 import (
 	"errors"
 	"log/slog"
+	"math"
 	"net"
 	"net/url"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -20,6 +22,8 @@ const (
 	EnvConcurrency = "BACKPROOF_CONCURRENCY"
 	EnvWorkDir     = "BACKPROOF_WORK_DIR"
 	EnvLogLevel    = "BACKPROOF_LOG_LEVEL"
+	EnvMemoryLimit = "BACKPROOF_MEMORY_LIMIT"
+	EnvCPULimit    = "BACKPROOF_CPU_LIMIT"
 )
 
 // Defaults for settings that are not set in the environment.
@@ -28,6 +32,24 @@ const (
 	DefaultConcurrency = 1
 	DefaultWorkDir     = "/var/lib/backproof"
 	DefaultLogLevel    = slog.LevelInfo
+)
+
+const (
+	minMemoryLimit = 64 * 1024 * 1024
+	minCPULimit    = 0.01
+	maxCPULimit    = 4096
+)
+
+var (
+	memoryLimitPattern = regexp.MustCompile(`^(\d+)([bkmgt]?)$`)
+	memoryUnits        = map[string]int64{
+		"":  1,
+		"b": 1,
+		"k": 1 << 10,
+		"m": 1 << 20,
+		"g": 1 << 30,
+		"t": 1 << 40,
+	}
 )
 
 // Config holds the validated runner settings.
@@ -39,6 +61,9 @@ type Config struct {
 	Concurrency int
 	WorkDir     string
 	LogLevel    slog.Level
+	// Zero means no limit.
+	MemoryLimitBytes int64
+	CPULimitNanos    int64
 }
 
 // LookupFunc reads one environment variable. os.LookupEnv satisfies it.
@@ -95,6 +120,22 @@ func Load(lookup LookupFunc) (Config, error) {
 		cfg.LogLevel = level
 	}
 
+	if raw := get(EnvMemoryLimit); raw != "" {
+		limit, err := parseMemoryLimit(raw)
+		if err != nil {
+			errs = append(errs, err)
+		}
+		cfg.MemoryLimitBytes = limit
+	}
+
+	if raw := get(EnvCPULimit); raw != "" {
+		limit, err := parseCPULimit(raw)
+		if err != nil {
+			errs = append(errs, err)
+		}
+		cfg.CPULimitNanos = limit
+	}
+
 	if err := errors.Join(errs...); err != nil {
 		return Config{}, err
 	}
@@ -125,6 +166,32 @@ func isLoopback(host string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+func parseMemoryLimit(raw string) (int64, error) {
+	invalid := errors.New(EnvMemoryLimit + " is not valid: set it to an amount of 64m or more, such as 512m or 4g")
+
+	match := memoryLimitPattern.FindStringSubmatch(strings.ToLower(raw))
+	if match == nil {
+		return 0, invalid
+	}
+	amount, err := strconv.ParseInt(match[1], 10, 64)
+	if err != nil {
+		return 0, invalid
+	}
+	unit := memoryUnits[match[2]]
+	if amount > math.MaxInt64/unit || amount*unit < minMemoryLimit {
+		return 0, invalid
+	}
+	return amount * unit, nil
+}
+
+func parseCPULimit(raw string) (int64, error) {
+	cpus, err := strconv.ParseFloat(raw, 64)
+	if err != nil || math.IsNaN(cpus) || cpus < minCPULimit || cpus > maxCPULimit {
+		return 0, errors.New(EnvCPULimit + " is not valid: set it to a number of CPUs of 0.01 or more, such as 1.5")
+	}
+	return int64(math.Round(cpus * 1e9)), nil
 }
 
 func parseLogLevel(raw string) (slog.Level, error) {

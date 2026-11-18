@@ -120,6 +120,46 @@ func TestLoadAPIURL(t *testing.T) {
 	}
 }
 
+func TestLoadContainerLimits(t *testing.T) {
+	cfg, err := Load(lookupFrom(nil))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.MemoryLimitBytes != 0 || cfg.CPULimitNanos != 0 {
+		t.Errorf("limits = %d bytes and %d nanos, want no limits by default", cfg.MemoryLimitBytes, cfg.CPULimitNanos)
+	}
+
+	memory := map[string]int64{
+		"64m":       64 << 20,
+		"512M":      512 << 20,
+		"4g":        4 << 30,
+		"1t":        1 << 40,
+		"65536k":    64 << 20,
+		"67108864":  64 << 20,
+		"67108864b": 64 << 20,
+	}
+	for value, want := range memory {
+		cfg, err := Load(lookupFrom(map[string]string{EnvMemoryLimit: value}))
+		if err != nil {
+			t.Errorf("memory limit %q: %v", value, err)
+		}
+		if cfg.MemoryLimitBytes != want {
+			t.Errorf("memory limit %q = %d, want %d", value, cfg.MemoryLimitBytes, want)
+		}
+	}
+
+	cpus := map[string]int64{"0.01": 10_000_000, "0.5": 500_000_000, "1.5": 1_500_000_000, "8": 8_000_000_000}
+	for value, want := range cpus {
+		cfg, err := Load(lookupFrom(map[string]string{EnvCPULimit: value}))
+		if err != nil {
+			t.Errorf("cpu limit %q: %v", value, err)
+		}
+		if cfg.CPULimitNanos != want {
+			t.Errorf("cpu limit %q = %d, want %d", value, cfg.CPULimitNanos, want)
+		}
+	}
+}
+
 func TestLoadRejectsInvalidValues(t *testing.T) {
 	tests := []struct {
 		key   string
@@ -133,6 +173,20 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		{EnvWorkDir, "relative/path"},
 		{EnvLogLevel, "verbose"},
 		{EnvLogLevel, "info+2"},
+		{EnvMemoryLimit, "63m"},
+		{EnvMemoryLimit, "0"},
+		{EnvMemoryLimit, "-1g"},
+		{EnvMemoryLimit, "1.5g"},
+		{EnvMemoryLimit, "4gb"},
+		{EnvMemoryLimit, "lots"},
+		{EnvMemoryLimit, "99999999999999999999t"},
+		{EnvMemoryLimit, "9000000000t"},
+		{EnvCPULimit, "0"},
+		{EnvCPULimit, "0.001"},
+		{EnvCPULimit, "-1"},
+		{EnvCPULimit, "two"},
+		{EnvCPULimit, "NaN"},
+		{EnvCPULimit, "Inf"},
 	}
 	for _, test := range tests {
 		t.Run(test.key+"="+test.value, func(t *testing.T) {
