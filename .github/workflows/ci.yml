@@ -52,6 +52,38 @@ jobs:
       - run: go test -race ./...
       - run: go test -tags integration -timeout 25m ./test/...
 
+  seal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: packages/seal
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+      - run: npm ci --ignore-scripts
+      - run: npm run typecheck
+      - run: npm run build
+      - name: Check the committed build is up to date
+        run: |
+          changes="$(git status --porcelain -- dist)"
+          if [ -n "$changes" ]; then
+            echo "$changes"
+            echo "Run npm run build in packages/seal and commit dist/."
+            exit 1
+          fi
+      - run: npm test
+      - name: Check the runner opens bundles sealed by the package
+        working-directory: .
+        run: go test -tags sealinterop -run 'TestRunner(Opens|Uses)' ./test/...
+
   snapshot:
     runs-on: ubuntu-latest
     timeout-minutes: 15
