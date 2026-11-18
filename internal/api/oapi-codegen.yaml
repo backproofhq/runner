@@ -1,0 +1,8 @@
+package: api
+output: client.gen.go
+generate:
+  models: true
+  client: true
+output-options:
+  # The sealing code and the runner share SealedBundleContents, which no endpoint refers to.
+  skip-prune: true
