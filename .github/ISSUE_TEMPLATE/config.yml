@@ -1,0 +1,4 @@
+contact_links:
+  - name: Report a security problem
+    url: https://github.com/backproofhq/runner/security/policy
+    about: Please report vulnerabilities privately instead of opening a public issue.
