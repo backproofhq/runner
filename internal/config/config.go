@@ -29,7 +29,7 @@ const (
 
 // Defaults for settings that are not set in the environment.
 const (
-	DefaultAPIURL      = "https://app.backproof.dev"
+	DefaultAPIURL      = "https://api.backproof.dev"
 	DefaultConcurrency = 1
 	DefaultWorkDir     = "/var/lib/backproof"
 	DefaultLogLevel    = slog.LevelInfo

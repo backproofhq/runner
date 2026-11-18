@@ -82,7 +82,7 @@ The runner connects out to:
 
 | Destination | Why |
 | --- | --- |
-| `app.backproof.dev` (HTTPS) | Jobs, heartbeats and results |
+| `api.backproof.dev` (HTTPS) | Jobs, heartbeats and results |
 | Your storage endpoint | Downloading backups |
 | Docker Hub | Pulling the runner image and `postgres` images |
 

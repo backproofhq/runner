@@ -8,7 +8,7 @@ The runner is configured through environment variables. An empty variable counts
 | --- | --- | --- | --- |
 | `BACKPROOF_TOKEN` | Runner token | None | Secret |
 | `BACKPROOF_RUNNER_KEY` | The runner's private age key, created at install | None | Secret |
-| `BACKPROOF_API_URL` | Address of the Backproof API | `https://app.backproof.dev` | An `https://` address without credentials, a query or a fragment. `http://` is accepted only for `localhost` and loopback addresses, for local development |
+| `BACKPROOF_API_URL` | Address of the Backproof API | `https://api.backproof.dev` | An `https://` address without credentials, a query or a fragment. `http://` is accepted only for `localhost` and loopback addresses, for local development |
 | `BACKPROOF_NAME` | Runner name shown in the dashboard | None | Any text |
 | `BACKPROOF_CONCURRENCY` | Jobs at a time | `1` | A whole number of 1 or more |
 | `BACKPROOF_WORK_DIR` | Directory for temporary files, including unpacked backups. They are deleted when the job ends | `/var/lib/backproof` | An absolute path |
