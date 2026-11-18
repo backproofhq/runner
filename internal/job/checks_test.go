@@ -5,11 +5,15 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/backproofhq/runner/internal/config"
 )
 
 func TestCheckTables(t *testing.T) {
 	orders := TableCount{Schema: "sales", Name: "orders", Rows: 10}
 	users := TableCount{Schema: "public", Name: "users", Rows: 5}
+	ordersBaseline := KeyedCount{Key: "sales.orders", Rows: 10}
+	usersBaseline := KeyedCount{Key: "public.users", Rows: 5}
 
 	tests := []struct {
 		name     string
@@ -20,11 +24,11 @@ func TestCheckTables(t *testing.T) {
 	}{
 		{name: "first run with tables", tables: []TableCount{orders}},
 		{name: "first run without tables", wantCode: "no_tables"},
-		{name: "new tables are fine", checks: Checks{Baseline: []TableCount{orders}}, tables: []TableCount{orders, users}},
-		{name: "baseline table gone", checks: Checks{Baseline: []TableCount{orders, users}}, tables: []TableCount{orders}, wantCode: "table_missing", missing: []string{"users"}},
-		{name: "expected table gone", checks: Checks{ExpectedTables: []TableRef{{Schema: "public", Name: "users"}}}, tables: []TableCount{orders}, wantCode: "table_missing", missing: []string{"users"}},
-		{name: "same name in another schema doesn't count", checks: Checks{ExpectedTables: []TableRef{{Schema: "archive", Name: "orders"}}}, tables: []TableCount{orders}, wantCode: "table_missing", missing: []string{"orders"}},
-		{name: "table listed twice is reported once", checks: Checks{ExpectedTables: []TableRef{{Schema: "public", Name: "users"}}, Baseline: []TableCount{users}}, tables: []TableCount{orders}, wantCode: "table_missing", missing: []string{"users"}},
+		{name: "new tables are fine", checks: Checks{Baseline: []KeyedCount{ordersBaseline}}, tables: []TableCount{orders, users}},
+		{name: "baseline table gone", checks: Checks{Baseline: []KeyedCount{ordersBaseline, usersBaseline}}, tables: []TableCount{orders}, wantCode: "table_missing", missing: []string{"public.users"}},
+		{name: "expected table gone", checks: Checks{ExpectedTables: []string{"public.users"}}, tables: []TableCount{orders}, wantCode: "table_missing", missing: []string{"public.users"}},
+		{name: "same name in another schema doesn't count", checks: Checks{ExpectedTables: []string{"archive.orders"}}, tables: []TableCount{orders}, wantCode: "table_missing", missing: []string{"archive.orders"}},
+		{name: "table listed twice is reported once", checks: Checks{ExpectedTables: []string{"public.users"}, Baseline: []KeyedCount{usersBaseline}}, tables: []TableCount{orders}, wantCode: "table_missing", missing: []string{"public.users"}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -39,7 +43,7 @@ func TestCheckTables(t *testing.T) {
 				t.Fatalf("findings = %+v, want %v", got.Tables, test.missing)
 			}
 			for index, name := range test.missing {
-				if got.Tables[index].Name != name || got.Tables[index].Problem != ProblemMissing {
+				if got.Tables[index].Key != name || got.Tables[index].Problem != ProblemMissing {
 					t.Errorf("finding %d = %+v, want %s missing", index, got.Tables[index], name)
 				}
 			}
@@ -48,15 +52,14 @@ func TestCheckTables(t *testing.T) {
 }
 
 func TestCheckRowCounts(t *testing.T) {
-	const schema, table = "public", "orders"
-	ref := TableRef{Schema: schema, Name: table}
+	const schema, table, key = "public", "orders", "public.orders"
 
 	tests := []struct {
 		name      string
 		baseline  int64
 		measured  int64
 		tolerance float64
-		overrides map[TableRef]float64
+		overrides map[string]float64
 		wantFail  bool
 	}{
 		{name: "unchanged", baseline: 100, measured: 100, tolerance: 0},
@@ -64,14 +67,14 @@ func TestCheckRowCounts(t *testing.T) {
 		{name: "just past the tolerance", baseline: 100, measured: 89, tolerance: 10, wantFail: true},
 		{name: "growth past the tolerance", baseline: 100, measured: 111, tolerance: 10, wantFail: true},
 		{name: "all rows lost", baseline: 100, measured: 0, tolerance: 50, wantFail: true},
-		{name: "override allows more", baseline: 100, measured: 50, tolerance: 10, overrides: map[TableRef]float64{ref: 60}},
-		{name: "override allows less", baseline: 100, measured: 95, tolerance: 10, overrides: map[TableRef]float64{ref: 1}, wantFail: true},
+		{name: "override allows more", baseline: 100, measured: 50, tolerance: 10, overrides: map[string]float64{key: 60}},
+		{name: "override allows less", baseline: 100, measured: 95, tolerance: 10, overrides: map[string]float64{key: 1}, wantFail: true},
 		{name: "empty table that filled up", baseline: 0, measured: 500, tolerance: 0},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			got := checkRowCounts(Checks{
-				Baseline:              []TableCount{{Schema: schema, Name: table, Rows: test.baseline}},
+				Baseline:              []KeyedCount{{Key: key, Rows: test.baseline}},
 				TolerancePercent:      test.tolerance,
 				TableTolerancePercent: test.overrides,
 			}, []TableCount{{Schema: schema, Name: table, Rows: test.measured}})
@@ -134,8 +137,8 @@ func TestFailureReasonsNeverNameTables(t *testing.T) {
 	const secretName = "private_table_name"
 	reading := TimestampReading{State: TimestampNoColumn}
 	results := evaluateChecks(Checks{
-		ExpectedTables:  []TableRef{{Schema: "public", Name: secretName}},
-		Baseline:        []TableCount{{Schema: "public", Name: "orders", Rows: 100}},
+		ExpectedTables:  []string{"public." + secretName},
+		Baseline:        []KeyedCount{{Key: "public.orders", Rows: 100}},
 		LatestTimestamp: &TimestampCheck{Table: TableRef{Schema: "public", Name: secretName}, Column: secretName, MaxAge: time.Hour},
 	}, []TableCount{{Schema: "public", Name: "orders", Rows: 1}}, &reading, time.Now())
 
@@ -151,5 +154,42 @@ func TestFailureReasonsNeverNameTables(t *testing.T) {
 	var failure *Failure
 	if !errors.As(firstFailure(results), &failure) || failure.Code != "table_missing" {
 		t.Errorf("firstFailure() = %+v, want the first failed check", failure)
+	}
+}
+
+func TestChecksCompareHashedTableKeys(t *testing.T) {
+	key := HashedTableKey(config.NewSecret("test-salt-with-enough-characters-1"))
+	orders := TableRef{Schema: "public", Name: "orders"}
+
+	results := evaluateChecks(Checks{
+		TableKey:         key,
+		Baseline:         []KeyedCount{{Key: key(orders), Rows: 100}},
+		TolerancePercent: 10,
+	}, []TableCount{{Schema: "public", Name: "orders", Rows: 50}}, nil, time.Now())
+
+	if results[0].Status != CheckPassed {
+		t.Errorf("tables check = %s, want the hashed table to be found", results[0].Status)
+	}
+	if results[1].Code != "row_count_changed" || results[1].Tables[0].Key != key(orders) {
+		t.Errorf("row count check = %+v, want the change reported under the hashed key", results[1])
+	}
+}
+
+func TestHashedTableKey(t *testing.T) {
+	salt := config.NewSecret("test-salt-with-enough-characters-1")
+	key := HashedTableKey(salt)
+
+	// Calculated separately: HMAC-SHA256 of "public\x00orders" with the salt as the key.
+	const want = "388d47b3e69f29d66413028fae1ad9ba9c89eb2a50878cb99bbec7f6d013ec71"
+	if got := key(TableRef{Schema: "public", Name: "orders"}); got != want {
+		t.Errorf("HashedTableKey() = %s, want %s", got, want)
+	}
+
+	other := HashedTableKey(config.NewSecret("another-salt-with-enough-characters"))
+	if key(TableRef{Schema: "public", Name: "orders"}) == other(TableRef{Schema: "public", Name: "orders"}) {
+		t.Error("two salts gave the same key")
+	}
+	if key(TableRef{Schema: "a.b", Name: "c"}) == key(TableRef{Schema: "a", Name: "b.c"}) {
+		t.Error("two different tables gave the same key")
 	}
 }

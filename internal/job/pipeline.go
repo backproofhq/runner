@@ -153,6 +153,7 @@ func run(ctx context.Context, engine Engine, logger *slog.Logger, jobID, file st
 		Stages:        []StageTiming{},
 		Tables:        []TableCount{},
 		Checks:        []CheckResult{},
+		onStage:       options.OnStage,
 	}
 
 	if err := engine.Ready(ctx); err != nil {
@@ -161,13 +162,13 @@ func run(ctx context.Context, engine Engine, logger *slog.Logger, jobID, file st
 	}
 
 	// A killed runner can't clean up after itself, so the next run does it.
-	removeOrphans(ctx, engine, logger, options.WorkDir, jobID)
+	removeOrphans(ctx, engine, logger, options, jobID)
 
 	defer func() {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
 		defer cancel()
 		err := result.timed(StageCleanup, func() error {
-			removeOrphans(cleanupCtx, engine, logger, options.WorkDir, jobID)
+			removeOrphans(cleanupCtx, engine, logger, options, jobID)
 			var removeFiles error
 			if options.WorkDir != "" {
 				removeFiles = os.RemoveAll(jobDirectory(options.WorkDir, jobID))
@@ -213,6 +214,9 @@ func run(ctx context.Context, engine Engine, logger *slog.Logger, jobID, file st
 	err = result.timed(StageDetectVersion, func() error {
 		var err error
 		version, err = engine.DetectVersion(ctx, jobID, dump)
+		if err == nil && version.Source == VersionDefault && options.PostgresHint > 0 {
+			version = Version{Major: options.PostgresHint, Source: VersionFromHint}
+		}
 		return err
 	})
 	if err != nil {
@@ -221,7 +225,7 @@ func run(ctx context.Context, engine Engine, logger *slog.Logger, jobID, file st
 	}
 	result.Backup.PostgresVersion = version.Full
 	result.Backup.VersionSource = version.Source
-	if version.Source == VersionFromDump {
+	if version.Source != VersionDefault {
 		result.Backup.PostgresMajor = version.Major
 	}
 
@@ -269,15 +273,21 @@ func run(ctx context.Context, engine Engine, logger *slog.Logger, jobID, file st
 }
 
 // removeOrphans only logs failures, because leftovers from another run say nothing about this backup.
-func removeOrphans(ctx context.Context, engine Engine, logger *slog.Logger, workDir, jobID string) {
-	if err := engine.RemoveOrphans(ctx, jobID); err != nil {
+func removeOrphans(ctx context.Context, engine Engine, logger *slog.Logger, options Options, jobID string) {
+	keep := []string{jobID}
+	if options.RunningJobs != nil {
+		keep = append(keep, options.RunningJobs()...)
+	}
+	if err := engine.RemoveOrphans(ctx, keep...); err != nil {
 		logger.WarnContext(ctx, "remove leftover containers", slog.Any("error", err))
 	}
-	removeStaleWorkFiles(ctx, logger, workDir, jobID)
+	removeStaleWorkFiles(ctx, logger, options.WorkDir, keep...)
 }
 
 func (r *Result) addVersionNotes(version Version) {
 	switch {
+	case version.Source == VersionFromHint:
+		r.Notes = append(r.Notes, fmt.Sprintf("The backup doesn't say which Postgres version made it, so it was restored into Postgres %d, as set for this source.", r.Backup.RestoredMajor))
 	case version.Source == VersionDefault:
 		r.Notes = append(r.Notes, fmt.Sprintf("The backup doesn't say which Postgres version made it, so it was restored into Postgres %d.", r.Backup.RestoredMajor))
 	case version.Major < r.Backup.RestoredMajor:
@@ -286,6 +296,9 @@ func (r *Result) addVersionNotes(version Version) {
 }
 
 func (r *Result) timed(stage Stage, run func() error) error {
+	if r.onStage != nil {
+		r.onStage(stage)
+	}
 	start := time.Now()
 	err := run()
 	r.Stages = append(r.Stages, StageTiming{Name: stage, DurationMS: time.Since(start).Milliseconds()})

@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"syscall"
 
 	"github.com/backproofhq/runner/internal/archive"
@@ -30,6 +31,12 @@ type Options struct {
 	Secrets  config.SourceSecrets
 	// DiskMargin is how many times the backup's size must be free before downloading it.
 	DiskMargin float64
+	// PostgresHint is the major version to use when the backup doesn't say which one made it.
+	PostgresHint int
+	// OnStage is told when each stage starts.
+	OnStage func(Stage)
+	// RunningJobs lists the other jobs in progress, whose containers and files must be kept.
+	RunningJobs func() []string
 }
 
 func jobDirectory(workDir, jobID string) string {
@@ -205,7 +212,7 @@ func finishDump(file io.ReaderAt, size int64, dump Dump) (Dump, error) {
 }
 
 // removeStaleWorkFiles deletes files a killed run left behind, which can include a decrypted dump.
-func removeStaleWorkFiles(ctx context.Context, logger *slog.Logger, workDir, keepJobID string) {
+func removeStaleWorkFiles(ctx context.Context, logger *slog.Logger, workDir string, keepJobIDs ...string) {
 	if workDir == "" {
 		return
 	}
@@ -219,7 +226,7 @@ func removeStaleWorkFiles(ctx context.Context, logger *slog.Logger, workDir, kee
 		return
 	}
 	for _, entry := range entries {
-		if entry.Name() == keepJobID {
+		if slices.Contains(keepJobIDs, entry.Name()) {
 			continue
 		}
 		if err := os.RemoveAll(filepath.Join(directory, entry.Name())); err != nil {

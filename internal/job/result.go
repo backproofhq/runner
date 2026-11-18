@@ -42,6 +42,7 @@ type VersionSource string
 // Places a Postgres version can come from.
 const (
 	VersionFromDump VersionSource = "dump"
+	VersionFromHint VersionSource = "hint"
 	VersionDefault  VersionSource = "default"
 )
 
@@ -57,6 +58,22 @@ type Result struct {
 	Tables        []TableCount  `json:"tables"`
 	Checks        []CheckResult `json:"checks"`
 	Notes         []string      `json:"notes,omitempty"`
+
+	onStage func(Stage)
+}
+
+// ErrorResult reports a job that couldn't start.
+func ErrorResult(failure *Failure) Result {
+	return Result{
+		SchemaVersion: schemaVersion,
+		Status:        failure.Status,
+		Stage:         failure.Stage,
+		ReasonCode:    failure.Code,
+		Reason:        failure.Reason,
+		Stages:        []StageTiming{},
+		Tables:        []TableCount{},
+		Checks:        []CheckResult{},
+	}
 }
 
 // Backup describes the file that was tested.
@@ -118,6 +135,9 @@ func (f *Failure) Unwrap() error {
 }
 
 func asFailure(ctx context.Context, err error) *Failure {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return RunnerError("job_timeout", "The job ran longer than its time limit. Raise the limit in the dashboard or check why the restore is slow.", err)
+	}
 	if ctx.Err() != nil {
 		return RunnerError("cancelled", "The restore was stopped before it finished. Run it again to test this backup.", err)
 	}
