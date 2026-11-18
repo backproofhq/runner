@@ -17,3 +17,4 @@ All notable changes to the Backproof runner are documented here. The project fol
 - `backproof register --token` registers a runner with an install token, creates its key pair and saves its settings to `/etc/backproof/runner.env`.
 - The v1 API contract between the runner and Backproof, in `api/v1/openapi.yaml`. The runner uses `https://api.backproof.dev` by default.
 - `BACKPROOF_MEMORY_LIMIT` and `BACKPROOF_CPU_LIMIT` settings for the throwaway Postgres containers.
+- `@backproof/seal`, the open-source package the dashboard uses to seal storage and decryption keys in the browser, and the runner code that opens them.
