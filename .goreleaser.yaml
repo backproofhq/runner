@@ -1,0 +1,59 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+project_name: backproof
+
+builds:
+  - id: backproof
+    main: ./cmd/backproof
+    binary: backproof
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X github.com/backproofhq/runner/internal/version.version={{ .Version }}
+      - -X github.com/backproofhq/runner/internal/version.commit={{ .ShortCommit }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "0.0.0-dev+{{ .ShortCommit }}"
+
+dockers_v2:
+  - id: runner
+    ids:
+      - backproof
+    images:
+      - backproofhq/runner
+    tags:
+      - dev
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    labels:
+      org.opencontainers.image.title: Backproof runner
+      org.opencontainers.image.source: https://github.com/backproofhq/runner
+      org.opencontainers.image.licenses: Apache-2.0
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+
+changelog:
+  disable: true
+
+# Snapshot builds only. The release pipeline is added in milestone M7.
+release:
+  disable: true
