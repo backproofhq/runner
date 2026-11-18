@@ -72,11 +72,29 @@ type Config struct {
 	DiskMargin float64
 }
 
-// SourceSecrets holds the local decryption keys of one backup source.
+// SourceSecrets holds the local keys of one backup source.
 type SourceSecrets struct {
+	S3AccessKey   Secret
+	S3SecretKey   Secret
 	AgeIdentity   Secret
 	GPGKey        Secret
 	GPGPassphrase Secret
+	NameSalt      Secret
+}
+
+// EnvSourceS3AccessKey names the variable holding a source's bucket access key.
+func EnvSourceS3AccessKey(sourceID string) string {
+	return "BP_SRC_" + strings.ToUpper(sourceID) + "_S3_ACCESS_KEY"
+}
+
+// EnvSourceS3SecretKey names the variable holding a source's bucket secret key.
+func EnvSourceS3SecretKey(sourceID string) string {
+	return "BP_SRC_" + strings.ToUpper(sourceID) + "_S3_SECRET_KEY"
+}
+
+// EnvSourceNameSalt names the variable holding the salt for hashing a source's table names.
+func EnvSourceNameSalt(sourceID string) string {
+	return "BP_SRC_" + strings.ToUpper(sourceID) + "_NAME_SALT"
 }
 
 // EnvSourceAgeIdentity names the variable holding a source's age private key.
@@ -94,16 +112,21 @@ func EnvSourceGPGPassphrase(sourceID string) string {
 	return "BP_SRC_" + strings.ToUpper(sourceID) + "_GPG_PASSPHRASE"
 }
 
-// LoadSourceSecrets reads the local decryption keys of a backup source.
+// LoadSourceSecrets reads the local keys of a backup source.
 func LoadSourceSecrets(lookup LookupFunc, sourceID string) SourceSecrets {
 	get := func(key string) Secret {
 		value, _ := lookup(key)
 		return NewSecret(strings.TrimSpace(value))
 	}
+	// An env file holds one value per line, so a GPG key's line breaks are written as \n.
+	gpgKey, _ := lookup(EnvSourceGPGKey(sourceID))
 	return SourceSecrets{
+		S3AccessKey:   get(EnvSourceS3AccessKey(sourceID)),
+		S3SecretKey:   get(EnvSourceS3SecretKey(sourceID)),
 		AgeIdentity:   get(EnvSourceAgeIdentity(sourceID)),
-		GPGKey:        get(EnvSourceGPGKey(sourceID)),
+		GPGKey:        NewSecret(strings.TrimSpace(strings.ReplaceAll(gpgKey, `\n`, "\n"))),
 		GPGPassphrase: get(EnvSourceGPGPassphrase(sourceID)),
+		NameSalt:      get(EnvSourceNameSalt(sourceID)),
 	}
 }
 
