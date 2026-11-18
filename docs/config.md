@@ -21,7 +21,7 @@ CI users only set `BACKPROOF_TOKEN`.
 
 ## Files
 
-> The runner reads environment variables. `backproof register` writes `runner.env`, which is passed to the container with `--env-file`. The runner doesn't read `sources.env` yet.
+`backproof register` writes `runner.env`. `backproof agent` reads it and `sources.env`, and environment variables take precedence over both files. Each line is `NAME=value`, taken literally. Blank lines and lines that start with `#` are skipped.
 
 | File | Purpose |
 | --- | --- |
@@ -30,7 +30,7 @@ CI users only set `BACKPROOF_TOKEN`.
 
 ## Local secrets
 
-> **Partly read.** The development command `backproof restore --file` reads the age and GPG variables with the source ID `LOCAL`, for example `BP_SRC_LOCAL_AGE_IDENTITY`. The other variables take effect when backup sources are added.
+The agent reads `sources.env` again before each job, so changed keys work without a restart. The development command `backproof restore --file` reads the age and GPG variables with the source ID `LOCAL`, for example `BP_SRC_LOCAL_AGE_IDENTITY`.
 
 Teams that want no secret to pass through Backproof can set these in `/etc/backproof/sources.env`, or as CI secrets with the same names. Local secrets take precedence over keys sealed in the dashboard.
 
@@ -43,4 +43,4 @@ Teams that want no secret to pass through Backproof can set these in `/etc/backp
 | `BP_SRC_<ID>_GPG_PASSPHRASE` | Passphrase for the GPG key |
 | `BP_SRC_<ID>_NAME_SALT` | Salt for hashing table names. The dashboard shows the value to paste |
 
-`<ID>` is the source ID in upper case, for example `BP_SRC_PROD_DB_S3_ACCESS_KEY`.
+`<ID>` is the source ID in upper case, for example `BP_SRC_PROD_DB_S3_ACCESS_KEY`. A GPG key has several lines, so write its line breaks as `\n` in `sources.env`.
