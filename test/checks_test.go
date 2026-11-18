@@ -137,7 +137,7 @@ func TestChecksJudgeRestoredBackups(t *testing.T) {
 							t.Fatalf("result = %s (%s): %s, want %s (%s)", result.Status, result.ReasonCode, result.Reason, test.wantStatus, test.wantCode)
 						}
 						if test.wantStatus == job.StatusPass {
-							runner.assertNoJobContainers(t)
+							runner.assertNothingLeft(t)
 							return
 						}
 						if result.Stage != job.StageCheck {
@@ -149,7 +149,7 @@ func TestChecksJudgeRestoredBackups(t *testing.T) {
 						if test.wantCheck != "" {
 							assertFailedCheck(t, result, test.wantCheck, test.wantTable)
 						}
-						runner.assertNoJobContainers(t)
+						runner.assertNothingLeft(t)
 					})
 				}
 			}
@@ -211,7 +211,7 @@ func TestBrokenBackupFixtures(t *testing.T) {
 							t.Errorf("reason %q does not mention %q", result.Reason, want)
 						}
 					}
-					runner.assertNoJobContainers(t)
+					runner.assertNothingLeft(t)
 				})
 			}
 		})

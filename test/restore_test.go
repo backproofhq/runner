@@ -65,7 +65,7 @@ func TestDumpsFromEverySupportedMajorRestore(t *testing.T) {
 							t.Errorf("%s has %d rows, want %d", name, got[name], rows)
 						}
 					}
-					runner.assertNoJobContainers(t)
+					runner.assertNothingLeft(t)
 				})
 			}
 
@@ -88,7 +88,7 @@ func TestDumpsFromEverySupportedMajorRestore(t *testing.T) {
 					if result.Reason == "" {
 						t.Error("result has no reason")
 					}
-					runner.assertNoJobContainers(t)
+					runner.assertNothingLeft(t)
 				})
 			}
 		})
