@@ -82,7 +82,7 @@ The runner connects out to:
 
 | Destination | Why |
 | --- | --- |
-| `app.backproof.dev` (HTTPS) | Jobs, heartbeats and results |
+| `api.backproof.dev` (HTTPS) | Jobs, heartbeats and results |
 | Your storage endpoint | Downloading backups |
 | Docker Hub | Pulling the runner image and `postgres` images |
 
@@ -97,7 +97,7 @@ If you use a firewall allowlist, these are all it needs. The restored database i
 ## Our side
 
 - Runner tokens are stored only as hashes. Install tokens work once and expire after one hour.
-- Every API route has automated tests that refuse access with another team's credentials.
+- Every API route has automated tests that refuse access with another workspace's credentials.
 - Results are kept only for your plan's retention period, then deleted.
 - The Backproof API and dashboard are hosted in the EU.
 - The API, authentication and sealing flow get an independent security review before runner 1.0.
