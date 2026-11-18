@@ -43,10 +43,13 @@ CREATE POLICY reader_rows ON public.customers FOR SELECT TO app_reader USING (tr
 CREATE TABLE sales.orders (
   id serial PRIMARY KEY,
   customer_id bigint NOT NULL REFERENCES public.customers (id),
-  total numeric(10, 2) NOT NULL
+  total numeric(10, 2) NOT NULL,
+  placed_at timestamptz NOT NULL
 );
 ALTER TABLE sales.orders OWNER TO app_owner;
-INSERT INTO sales.orders (customer_id, total) VALUES (1, 10.50), (2, 99.99);
+INSERT INTO sales.orders (customer_id, total, placed_at) VALUES
+  (1, 10.50, '2026-01-10 12:00:00+00'),
+  (2, 99.99, '2026-01-15 12:00:00+00');
 
 CREATE TABLE public.events (id int NOT NULL, happened_on date NOT NULL) PARTITION BY RANGE (happened_on);
 CREATE TABLE public.events_2025 PARTITION OF public.events FOR VALUES FROM ('2025-01-01') TO ('2026-01-01');
@@ -55,12 +58,19 @@ INSERT INTO public.events VALUES (1, '2025-03-01'), (2, '2025-04-01'), (3, '2026
 
 CREATE TABLE public."Odd Name" (id int);
 INSERT INTO public."Odd Name" VALUES (1);
+
+CREATE TABLE public.audit_log (happened_at timestamp NOT NULL);
+INSERT INTO public.audit_log VALUES ('2026-01-14 08:00:00');
+
+CREATE TABLE public.empty_log (happened_at timestamptz);
 `
 
 const fixtureJobPrefix = "fixture-"
 
 var fixtureTables = map[string]int64{
+	"public.audit_log": 1,
 	"public.customers": 3,
+	"public.empty_log": 0,
 	"public.events":    4,
 	"public.Odd Name":  1,
 	"sales.orders":     2,
@@ -94,8 +104,13 @@ func newTestRunner(t *testing.T) *testRunner {
 
 func (r *testRunner) restore(t *testing.T, path string) job.Result {
 	t.Helper()
+	return r.restoreWithChecks(t, path, job.Checks{})
+}
+
+func (r *testRunner) restoreWithChecks(t *testing.T, path string, checks job.Checks) job.Result {
+	t.Helper()
 	logger := slog.New(slog.DiscardHandler)
-	return job.RunLocal(t.Context(), postgres.New(r.docker, docker.Limits{}), logger, randomID(t), path)
+	return job.RunLocal(t.Context(), postgres.New(r.docker, docker.Limits{}), logger, randomID(t), path, checks)
 }
 
 func (r *testRunner) labels(jobID string) map[string]string {
@@ -149,10 +164,24 @@ func (r *testRunner) assertNoJobContainers(t *testing.T) {
 	}
 }
 
-type dumpFiles struct {
+type dumpPair struct {
 	plain  string
 	custom string
 }
+
+type dumpFiles struct {
+	healthy   dumpPair
+	empty     dumpPair
+	extension dumpPair
+}
+
+// fixtureExtension installs a stand-in for postgis on the fixture server only, so its dumps
+// really need an extension that the restore image doesn't have.
+const fixtureExtension = `
+directory=/usr/share/postgresql/%d/extension
+printf "comment = 'fixture'\ndefault_version = '1.0'\nrelocatable = true\n" > "$directory/postgis.control"
+echo "CREATE FUNCTION fixture_extension_marker() RETURNS int LANGUAGE sql AS 'SELECT 1';" > "$directory/postgis--1.0.sql"
+`
 
 // generateDumps creates real dumps with the pg_dump of the given major.
 func generateDumps(t *testing.T, runner *testRunner, major int) dumpFiles {
@@ -208,8 +237,21 @@ func generateDumps(t *testing.T, runner *testRunner, major int) dumpFiles {
 		}
 	}
 	run("psql", "-X", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "fixture", "-c", fixtureSchema)
-	run("pg_dump", "-U", "postgres", "-d", "fixture", "--format=plain", "-f", "/tmp/fixture.sql")
-	run("pg_dump", "-U", "postgres", "-d", "fixture", "--format=custom", "-f", "/tmp/fixture.dump")
+	run("createdb", "-U", "postgres", "empty_database")
+	run("sh", "-c", fmt.Sprintf(fixtureExtension, major))
+	run("createdb", "-U", "postgres", "with_extension")
+	run("psql", "-X", "-v", "ON_ERROR_STOP=1", "-U", "postgres", "-d", "with_extension", "-c", "CREATE EXTENSION postgis")
+
+	dump := func(database, name string) dumpPair {
+		t.Helper()
+		plain, custom := "/tmp/"+name+".sql", "/tmp/"+name+".dump"
+		run("pg_dump", "-U", "postgres", "-d", database, "--format=plain", "-f", plain)
+		run("pg_dump", "-U", "postgres", "-d", database, "--format=custom", "-f", custom)
+		return dumpPair{plain: plain, custom: custom}
+	}
+	healthy := dump("fixture", "healthy")
+	empty := dump("empty_database", "empty")
+	extension := dump("with_extension", "extension")
 
 	directory := t.TempDir()
 	copyOut := func(source, name string) string {
@@ -231,10 +273,14 @@ func generateDumps(t *testing.T, runner *testRunner, major int) dumpFiles {
 		}
 		return path
 	}
-	return dumpFiles{
-		plain:  copyOut("/tmp/fixture.sql", "fixture.sql"),
-		custom: copyOut("/tmp/fixture.dump", "fixture.dump"),
+	copyPair := func(pair dumpPair) dumpPair {
+		t.Helper()
+		return dumpPair{
+			plain:  copyOut(pair.plain, filepath.Base(pair.plain)),
+			custom: copyOut(pair.custom, filepath.Base(pair.custom)),
+		}
 	}
+	return dumpFiles{healthy: copyPair(healthy), empty: copyPair(empty), extension: copyPair(extension)}
 }
 
 func randomID(t *testing.T) string {
