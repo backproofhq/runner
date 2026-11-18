@@ -143,10 +143,10 @@ Descriptions of commits should be consice or not exists at all
 - A breaking change gets `!` after the type and a `BREAKING CHANGE:` footer.
 - Sign off every commit (`git commit -s`) for the Developer Certificate of Origin.
 
-**Pull requests** use this structure:
+**Pull requests** follow these rules:
 
 - Conventional commit titles, plain language: fix(web): new threads no longer spike CPU.
-- Body: the problem in a sentence or two, then how you fixed it.
+- Body: fill in `.github/pull_request_template.md`, starting with the problem in a sentence or two, then how you fixed it.
 - Only when asked should you split a PR into stacked PR.
 - Watch the PR untill al checks are verfied, if any pre-pr check failed fix them and update the PR.
 
