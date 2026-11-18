@@ -663,6 +663,32 @@ type RegisterResponse struct {
 	RunnerToken string `json:"runner_token"`
 }
 
+// RunnerSource defines model for RunnerSource.
+type RunnerSource struct {
+	// HasSealedKeys Whether keys entered in the dashboard are sealed for this runner.
+	HasSealedKeys bool `json:"has_sealed_keys"`
+
+	// Id The source ID, also used in local secret names such as `BP_SRC_PROD_DB_S3_ACCESS_KEY`.
+	//
+	// Example: PROD_DB
+	Id string `json:"id"`
+}
+
+// RunnerStatus defines model for RunnerStatus.
+type RunnerStatus struct {
+	// KeyFingerprint The fingerprint of the public key Backproof holds for this runner, to compare with the runner's own key.
+	//
+	// Example: SHA256:4m4FJEkQ1+4bsddQHkzIqik856xUVFF2r27Q/fZPLno
+	KeyFingerprint string `json:"key_fingerprint"`
+
+	// Name The name shown in the dashboard.
+	Name     string             `json:"name"`
+	RunnerId openapi_types.UUID `json:"runner_id"`
+
+	// Sources Every source in this runner's workspace.
+	Sources []RunnerSource `json:"sources"`
+}
+
 // SealedBundleContents What `sealed_bundle` decrypts to. The API never sees this object. It is defined here so the
 // dashboard's sealing code and the runner agree on it.
 type SealedBundleContents struct {
@@ -935,6 +961,15 @@ type ClientInterface interface {
 	// Corresponds with POST /v1/jobs/{id}/result (the `SubmitJobResult` operationId).
 	SubmitJobResult(ctx context.Context, id JobId, body SubmitJobResultJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetRunnerStatus Show what Backproof knows about this runner
+	//
+	// Lets `backproof doctor` confirm the token works and list the sources this runner has keys
+	// for. It is read-only: it never claims a job and doesn't count as a check-in. Keys and
+	// sealed bundles are never returned.
+	//
+	// Corresponds with GET /v1/runners/me (the `GetRunnerStatus` operationId).
+	GetRunnerStatus(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// PollRunnerWithBody Check in and ask for work
 	//
 	// Records the check-in and claims the oldest due job this runner may take. A claimed job has
@@ -1050,6 +1085,25 @@ func (c *Client) SubmitJobResultWithBody(ctx context.Context, id JobId, contentT
 // Corresponds with POST /v1/jobs/{id}/result (the `SubmitJobResult` operationId).
 func (c *Client) SubmitJobResult(ctx context.Context, id JobId, body SubmitJobResultJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewSubmitJobResultRequest(c.Server, id, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+// GetRunnerStatus Show what Backproof knows about this runner
+//
+// Lets `backproof doctor` confirm the token works and list the sources this runner has keys
+// for. It is read-only: it never claims a job and doesn't count as a check-in. Keys and
+// sealed bundles are never returned.
+//
+// Corresponds with GET /v1/runners/me (the `GetRunnerStatus` operationId).
+func (c *Client) GetRunnerStatus(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetRunnerStatusRequest(c.Server)
 	if err != nil {
 		return nil, err
 	}
@@ -1240,6 +1294,33 @@ func NewSubmitJobResultRequestWithBody(server string, id JobId, contentType stri
 	return req, nil
 }
 
+// NewGetRunnerStatusRequest constructs an http.Request for the GetRunnerStatus method
+func NewGetRunnerStatusRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v1/runners/me")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodGet, queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewPollRunnerRequest calls the generic PollRunner builder with application/json body
 func NewPollRunnerRequest(server string, body PollRunnerJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -1401,6 +1482,17 @@ type ClientWithResponsesInterface interface {
 	//
 	// Corresponds with POST /v1/jobs/{id}/result (the `SubmitJobResult` operationId).
 	SubmitJobResultWithResponse(ctx context.Context, id JobId, body SubmitJobResultJSONRequestBody, reqEditors ...RequestEditorFn) (*SubmitJobResultResponse, error)
+
+	// GetRunnerStatusWithResponse Show what Backproof knows about this runner
+	//
+	// Lets `backproof doctor` confirm the token works and list the sources this runner has keys
+	// for. It is read-only: it never claims a job and doesn't count as a check-in. Keys and
+	// sealed bundles are never returned.
+	//
+	// Returns a wrapper object for the known response body format(s).
+	//
+	// Corresponds with GET /v1/runners/me (the `GetRunnerStatus` operationId).
+	GetRunnerStatusWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetRunnerStatusResponse, error)
 
 	// PollRunnerWithBodyWithResponse Check in and ask for work
 	//
@@ -1602,6 +1694,76 @@ func (r SubmitJobResultResponse) StatusCode() int {
 
 // ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
 func (r SubmitJobResultResponse) ContentType() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Header.Get("Content-Type")
+	}
+	return ""
+}
+
+// GetRunnerStatusResponse200Headers the declared response headers of an HTTP 200 response for GetRunnerStatus
+type GetRunnerStatusResponse200Headers struct {
+	BackproofLatestVersion string
+	BackproofMinVersion    string
+}
+
+// GetRunnerStatusResponse429Headers the declared response headers of an HTTP 429 response for GetRunnerStatus
+type GetRunnerStatusResponse429Headers struct {
+	RetryAfter int
+}
+
+type GetRunnerStatusResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	// JSON200 the response for an HTTP 200 `application/json` response
+	JSON200 *RunnerStatus
+	// JSON401 the response for an HTTP 401 `application/json` response
+	JSON401 *Unauthorized
+	// JSON429 the response for an HTTP 429 `application/json` response
+	JSON429 *TooManyRequests
+	// Headers200 the parsed response headers for an HTTP 200 response
+	Headers200 *GetRunnerStatusResponse200Headers
+	// Headers429 the parsed response headers for an HTTP 429 response
+	Headers429 *GetRunnerStatusResponse429Headers
+}
+
+// GetJSON200 returns the response for an HTTP 200 `application/json` response
+func (r GetRunnerStatusResponse) GetJSON200() *RunnerStatus {
+	return r.JSON200
+}
+
+// GetJSON401 returns the response for an HTTP 401 `application/json` response
+func (r GetRunnerStatusResponse) GetJSON401() *Unauthorized {
+	return r.JSON401
+}
+
+// GetJSON429 returns the response for an HTTP 429 `application/json` response
+func (r GetRunnerStatusResponse) GetJSON429() *TooManyRequests {
+	return r.JSON429
+}
+
+// GetBody returns the raw response body bytes
+func (r GetRunnerStatusResponse) GetBody() []byte {
+	return r.Body
+}
+
+// Status returns HTTPResponse.Status
+func (r GetRunnerStatusResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetRunnerStatusResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+// ContentType is a convenience method to retrieve the Content-Type value from the HTTP response headers
+func (r GetRunnerStatusResponse) ContentType() string {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.Header.Get("Content-Type")
 	}
@@ -1842,6 +2004,23 @@ func (c *ClientWithResponses) SubmitJobResultWithResponse(ctx context.Context, i
 	return ParseSubmitJobResultResponse(rsp)
 }
 
+// GetRunnerStatusWithResponse Show what Backproof knows about this runner
+//
+// Lets `backproof doctor` confirm the token works and list the sources this runner has keys
+// for. It is read-only: it never claims a job and doesn't count as a check-in. Keys and
+// sealed bundles are never returned.
+//
+// Returns a wrapper object for the known response body format(s).
+//
+// Corresponds with GET /v1/runners/me (the `GetRunnerStatus` operationId).
+func (c *ClientWithResponses) GetRunnerStatusWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*GetRunnerStatusResponse, error) {
+	rsp, err := c.GetRunnerStatus(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetRunnerStatusResponse(rsp)
+}
+
 // PollRunnerWithBodyWithResponse Check in and ask for work
 //
 // Records the check-in and claims the oldest due job this runner may take. A claimed job has
@@ -2043,6 +2222,76 @@ func ParseSubmitJobResultResponse(rsp *http.Response) (*SubmitJobResultResponse,
 	switch {
 	case rsp.StatusCode == 429:
 		var headers SubmitJobResultResponse429Headers
+		if values := rsp.Header.Values("Retry-After"); len(values) > 0 {
+			var value int
+			if err := runtime.BindStyledParameterWithOptions("simple", "Retry-After", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: true, Type: "integer", Format: ""}); err != nil {
+				return nil, err
+			}
+			headers.RetryAfter = value
+		}
+		response.Headers429 = &headers
+	}
+
+	return response, nil
+}
+
+// ParseGetRunnerStatusResponse parses an HTTP response from a GetRunnerStatusWithResponse call
+func ParseGetRunnerStatusResponse(rsp *http.Response) (*GetRunnerStatusResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetRunnerStatusResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RunnerStatus
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest Unauthorized
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 429:
+		var dest TooManyRequests
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON429 = &dest
+
+	}
+
+	switch {
+	case rsp.StatusCode == 200:
+		var headers GetRunnerStatusResponse200Headers
+		if values := rsp.Header.Values("Backproof-Latest-Version"); len(values) > 0 {
+			var value string
+			if err := runtime.BindStyledParameterWithOptions("simple", "Backproof-Latest-Version", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: true, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			}
+			headers.BackproofLatestVersion = value
+		}
+		if values := rsp.Header.Values("Backproof-Min-Version"); len(values) > 0 {
+			var value string
+			if err := runtime.BindStyledParameterWithOptions("simple", "Backproof-Min-Version", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: true, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			}
+			headers.BackproofMinVersion = value
+		}
+		response.Headers200 = &headers
+	case rsp.StatusCode == 429:
+		var headers GetRunnerStatusResponse429Headers
 		if values := rsp.Header.Values("Retry-After"); len(values) > 0 {
 			var value int
 			if err := runtime.BindStyledParameterWithOptions("simple", "Retry-After", values[0], &value, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: true, Type: "integer", Format: ""}); err != nil {
