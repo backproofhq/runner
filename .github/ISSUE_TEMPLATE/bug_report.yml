@@ -1,0 +1,139 @@
+name: Bug report
+description: Report a problem with the Backproof runner
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve the runner.
+
+        **Found a security problem?** Please don't open an issue. Report it privately as described in [SECURITY.md](https://github.com/backproofhq/runner/security/policy).
+
+        **This issue is public.** Never include keys, tokens, passphrases, row contents or SQL from a dump.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the problem, including any error message or reason shown by the runner or dashboard.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Share the smallest set of steps that shows the problem. If it depends on a backup, describe how the dump was made instead of attaching it.
+      placeholder: |
+        1. Create a dump with `pg_dump --format=custom ...`
+        2. Run `backproof run --once`
+        3. See the result in the dashboard
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Runner version
+      description: The output of `backproof version`.
+      placeholder: backproof 1.2.3 (commit abc1234)
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: How do you run the runner?
+      options:
+        - Agent (`backproof agent`)
+        - One-shot (`backproof run --once`)
+        - GitHub Action
+        - GitLab CI
+    validations:
+      required: true
+  - type: dropdown
+    id: result
+    attributes:
+      label: Result reported
+      description: "`fail` means the backup is bad. `error` means the runner couldn't do its job."
+      options:
+        - pass
+        - fail
+        - error
+        - No result
+        - Not related to a job
+    validations:
+      required: true
+  - type: dropdown
+    id: stage
+    attributes:
+      label: Stage
+      description: The stage where the job stopped, if you know it.
+      options:
+        - Resolve
+        - Preflight
+        - Download
+        - Decrypt and decompress
+        - Detect version
+        - Restore
+        - Check
+        - Clean up
+        - Not sure
+        - Not related to a job
+  - type: dropdown
+    id: postgres
+    attributes:
+      label: Postgres major version of the backup
+      options:
+        - "14"
+        - "15"
+        - "16"
+        - "17"
+        - "18"
+        - Other
+        - Not sure
+        - Not related to a backup
+  - type: dropdown
+    id: backup-format
+    attributes:
+      label: Backup format
+      description: Select everything that applies.
+      multiple: true
+      options:
+        - Plain SQL (`.sql`)
+        - Custom format (`.dump`)
+        - gzip
+        - zstd
+        - age encryption
+        - GPG encryption
+  - type: input
+    id: storage
+    attributes:
+      label: Storage provider
+      placeholder: AWS S3, Hetzner Object Storage, Cloudflare R2, Backblaze B2, MinIO
+  - type: input
+    id: environment
+    attributes:
+      label: Host environment
+      description: Operating system, architecture and Docker version.
+      placeholder: Ubuntu 24.04, amd64, Docker 29.10.0
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Runner logs
+      description: Paste only the relevant lines. Restore tool output can contain table names or pieces of SQL, so review and redact it first.
+      render: shell
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Before you submit
+      options:
+        - label: I searched the existing issues and didn't find this problem.
+          required: true
+        - label: This report contains no secrets, row contents or SQL from a dump.
+          required: true

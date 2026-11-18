@@ -1,0 +1,68 @@
+name: Feature request
+description: Suggest an improvement to the Backproof runner
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for sharing your idea. The most helpful requests explain the problem you want solved.
+
+        **This issue is public.** Never include keys, tokens, passphrases, row contents or SQL from a dump.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Describe what you're trying to do and what gets in your way today.
+      placeholder: My backups are stored as ..., so the runner can't ...
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: What would you like to happen?
+      description: Describe the behaviour you have in mind, including any commands or settings you'd expect.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What have you tried or considered instead?
+      description: Include workarounds you use today.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Restores
+        - Backup checks
+        - Backup storage
+        - Compression or encryption
+        - Agent mode
+        - One-shot mode
+        - GitHub Action or GitLab CI
+        - Install and updates
+        - Logs and diagnostics
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: data-boundary
+    attributes:
+      label: Would this change what leaves your infrastructure?
+      description: The runner only sends metadata to Backproof. Customer data never leaves your machine.
+      options:
+        - "No"
+        - Yes, it would send additional metadata
+        - Not sure
+    validations:
+      required: true
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Before you submit
+      options:
+        - label: I searched the existing issues and didn't find this request.
+          required: true
+        - label: I'd like to help build this.
