@@ -3,6 +3,10 @@
 
 # GoReleaser output
 dist/
+# The web app installs @backproof/seal from Git and runs no build step.
+!/packages/seal/dist/
+
+node_modules/
 
 # Local secrets
 .env*
