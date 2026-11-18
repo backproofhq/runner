@@ -607,3 +607,203 @@ func TestACrashedJobIsReportedAndTheAgentCarriesOn(t *testing.T) {
 		t.Error("the logs contain what the job crashed on")
 	}
 }
+
+func onceAgent(t *testing.T, client *api.RunnerClient, run Runner) *Agent {
+	t.Helper()
+	agent := New(Options{
+		Client:       client,
+		Run:          run,
+		Logger:       slog.New(slog.DiscardHandler),
+		Concurrency:  1,
+		Version:      "1.2.3",
+		Capabilities: DefaultCapabilities(),
+	})
+	agent.heartbeatInterval = 5 * time.Millisecond
+	agent.retryDelay = time.Millisecond
+	agent.sleep = func(context.Context, time.Duration) {}
+	return agent
+}
+
+func withStatus(status job.Status) api.JobResult {
+	return ToResult(job.Result{SchemaVersion: 1, Status: status}, job.PlainTableKey)
+}
+
+func TestRunOnceRunsEveryDueJobOneAfterAnother(t *testing.T) {
+	fake, client := newFakeBackproof(t)
+	fake.enqueue(testJob(t, 1), testJob(t, 2), testJob(t, 3))
+	statuses := []job.Status{job.StatusPass, job.StatusFail, job.StatusError}
+	var running, runs atomic.Int32
+
+	summary, err := onceAgent(t, client, func(context.Context, api.Job, JobContext) api.JobResult {
+		if running.Add(1) != 1 {
+			t.Error("two jobs ran at the same time")
+		}
+		defer running.Add(-1)
+		return withStatus(statuses[runs.Add(1)-1])
+	}).RunOnce(t.Context(), t.Context())
+
+	if err != nil {
+		t.Fatalf("RunOnce() error = %v", err)
+	}
+	if summary != (OnceSummary{Passed: 1, Failed: 1, Errors: 1}) {
+		t.Errorf("summary = %+v", summary)
+	}
+	if results, _, _, _ := fake.snapshot(); len(results) != 3 {
+		t.Errorf("%d results reported, want 3", len(results))
+	}
+}
+
+func TestRunOnceWithNothingDueExitsCleanly(t *testing.T) {
+	fake, client := newFakeBackproof(t)
+
+	summary, err := onceAgent(t, client, func(context.Context, api.Job, JobContext) api.JobResult {
+		t.Error("a job ran although none was due")
+		return passed()
+	}).RunOnce(t.Context(), t.Context())
+
+	if err != nil || summary != (OnceSummary{}) || summary.ExitCode(err) != ExitPassed {
+		t.Errorf("RunOnce() = %+v, %v, want a clean exit", summary, err)
+	}
+	if _, _, statuses, _ := fake.snapshot(); len(statuses) != 1 {
+		t.Errorf("%d polls, want 1", len(statuses))
+	}
+}
+
+func TestOnceExitCodes(t *testing.T) {
+	problem := fmt.Errorf("the API is down")
+	tests := []struct {
+		name    string
+		summary OnceSummary
+		err     error
+		want    int
+	}{
+		{"nothing due", OnceSummary{}, nil, ExitPassed},
+		{"all passed", OnceSummary{Passed: 3}, nil, ExitPassed},
+		{"a backup failed", OnceSummary{Passed: 2, Failed: 1}, nil, ExitBackupFailed},
+		{"the runner hit an error", OnceSummary{Passed: 2, Errors: 1}, nil, ExitRunnerError},
+		{"the run stopped early", OnceSummary{Passed: 2}, problem, ExitRunnerError},
+		{"a failed backup outweighs an error", OnceSummary{Failed: 1, Errors: 1}, nil, ExitBackupFailed},
+		{"a failed backup outweighs a stopped run", OnceSummary{Failed: 1}, problem, ExitBackupFailed},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.summary.ExitCode(test.err); got != test.want {
+				t.Errorf("ExitCode() = %d, want %d", got, test.want)
+			}
+		})
+	}
+}
+
+func TestRunOnceStopsWhenTheRunnerIsOutdatedOrRevoked(t *testing.T) {
+	tests := map[string]struct {
+		status  int
+		message string
+	}{
+		"outdated": {http.StatusUpgradeRequired, "This runner is too old to receive jobs. Update it with the install script."},
+		"revoked":  {http.StatusUnauthorized, "This runner was revoked. Register it again."},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			fake, client := newFakeBackproof(t)
+			fake.pollAnswer = func() (int, string) {
+				return test.status, fmt.Sprintf(`{"code":"refused","message":%q}`, test.message)
+			}
+
+			summary, err := onceAgent(t, client, func(context.Context, api.Job, JobContext) api.JobResult {
+				t.Error("a refused runner ran a job")
+				return passed()
+			}).RunOnce(t.Context(), t.Context())
+
+			if err == nil || !strings.Contains(err.Error(), test.message) {
+				t.Errorf("error = %v, want the API's explanation", err)
+			}
+			if summary.ExitCode(err) != ExitRunnerError {
+				t.Errorf("exit code = %d, want %d", summary.ExitCode(err), ExitRunnerError)
+			}
+			if _, _, statuses, _ := fake.snapshot(); len(statuses) != 1 {
+				t.Errorf("%d polls, want it to stop at once", len(statuses))
+			}
+		})
+	}
+}
+
+func TestRunOnceRetriesBrieflyWhenTheAPIFails(t *testing.T) {
+	down := func() (int, string) { return http.StatusServiceUnavailable, `{"code":"down","message":"Try later."}` }
+
+	t.Run("recovers", func(t *testing.T) {
+		fake, client := newFakeBackproof(t)
+		var calls atomic.Int32
+		fake.pollAnswer = func() (int, string) {
+			if calls.Add(1) < oncePollAttempts {
+				return down()
+			}
+			return http.StatusNoContent, ""
+		}
+		if _, err := onceAgent(t, client, nil).RunOnce(t.Context(), t.Context()); err != nil {
+			t.Errorf("RunOnce() error = %v, want it to recover", err)
+		}
+	})
+
+	t.Run("gives up", func(t *testing.T) {
+		fake, client := newFakeBackproof(t)
+		fake.pollAnswer = down
+		summary, err := onceAgent(t, client, nil).RunOnce(t.Context(), t.Context())
+		if err == nil || summary.ExitCode(err) != ExitRunnerError {
+			t.Errorf("RunOnce() = %+v, %v, want a runner error", summary, err)
+		}
+		if _, _, statuses, _ := fake.snapshot(); len(statuses) != oncePollAttempts {
+			t.Errorf("%d polls, want %d", len(statuses), oncePollAttempts)
+		}
+	})
+}
+
+func TestRunOnceCountsAResultBackproofNeverReceived(t *testing.T) {
+	fake, client := newFakeBackproof(t)
+	fake.resultAnswer = func(int) int { return http.StatusConflict }
+	fake.enqueue(testJob(t, 1))
+
+	summary, err := onceAgent(t, client, func(context.Context, api.Job, JobContext) api.JobResult { return passed() }).RunOnce(t.Context(), t.Context())
+
+	if err != nil {
+		t.Fatalf("RunOnce() error = %v", err)
+	}
+	if summary.ExitCode(err) != ExitRunnerError {
+		t.Errorf("summary = %+v, want a runner error for the lost result", summary)
+	}
+}
+
+func TestRunOnceCountsAJobItLost(t *testing.T) {
+	fake, client := newFakeBackproof(t)
+	fake.heartbeatAnswer = func() (int, string) { return http.StatusConflict, `{"code":"lease_lost","message":"Gone."}` }
+	fake.enqueue(testJob(t, 1))
+
+	summary, err := onceAgent(t, client, func(ctx context.Context, _ api.Job, _ JobContext) api.JobResult {
+		<-ctx.Done()
+		return passed()
+	}).RunOnce(t.Context(), t.Context())
+
+	if err != nil || summary != (OnceSummary{Errors: 1}) {
+		t.Errorf("RunOnce() = %+v, %v, want one error", summary, err)
+	}
+}
+
+func TestRunOnceClaimsNothingAfterAStopSignal(t *testing.T) {
+	fake, client := newFakeBackproof(t)
+	fake.enqueue(testJob(t, 1), testJob(t, 2))
+	ctx, drain := context.WithCancel(t.Context())
+	defer drain()
+	var runs atomic.Int32
+
+	summary, err := onceAgent(t, client, func(context.Context, api.Job, JobContext) api.JobResult {
+		runs.Add(1)
+		drain()
+		return passed()
+	}).RunOnce(ctx, t.Context())
+
+	if runs.Load() != 1 {
+		t.Errorf("%d jobs ran, want the running job to finish and no more", runs.Load())
+	}
+	if summary.Passed != 1 || err == nil || summary.ExitCode(err) != ExitRunnerError {
+		t.Errorf("RunOnce() = %+v, %v, want the stopped run reported", summary, err)
+	}
+}
