@@ -40,15 +40,9 @@ func newRootCommand(stdout, stderr io.Writer, lookup config.LookupFunc) *cobra.C
 		}
 	}
 
-	runCmd := stub("run", "Run every due job once, then exit")
-	runCmd.Flags().Bool("once", false, "run the jobs that are due, then exit")
-	if err := runCmd.MarkFlagRequired("once"); err != nil {
-		panic(err) // The flag is defined on the line above, so this is a programming error.
-	}
-
 	root.AddCommand(
 		newAgentCommand(stderr, lookup),
-		runCmd,
+		newRunCommand(stdout, stderr, lookup),
 		newRegisterCommand(stdout, lookup),
 		stub("doctor", "Check this runner's setup"),
 		newRestoreCommand(stdout, stderr, lookup),

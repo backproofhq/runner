@@ -21,6 +21,14 @@ const (
 	maxRetryDelay     = 5 * time.Minute
 	resultAttempts    = 6
 	resultTimeout     = 10 * time.Minute
+	oncePollAttempts  = 5
+)
+
+// Exit codes of a one-shot run, which CI systems act on.
+const (
+	ExitPassed       = 0
+	ExitBackupFailed = 1
+	ExitRunnerError  = 2
 )
 
 // JobContext connects a running job to the agent.
@@ -104,6 +112,73 @@ func (a *Agent) Run(ctx, jobs context.Context) error {
 	return nil
 }
 
+// OnceSummary counts the outcomes of a one-shot run.
+type OnceSummary struct {
+	Passed int
+	Failed int
+	Errors int
+}
+
+// ExitCode reports a broken backup first, because that is the finding someone has to act on.
+func (s OnceSummary) ExitCode(runErr error) int {
+	switch {
+	case s.Failed > 0:
+		return ExitBackupFailed
+	case s.Errors > 0 || runErr != nil:
+		return ExitRunnerError
+	default:
+		return ExitPassed
+	}
+}
+
+// RunOnce runs the jobs that are due, one after another, and returns when none are left.
+func (a *Agent) RunOnce(ctx, jobs context.Context) (OnceSummary, error) {
+	var summary OnceSummary
+	failures := 0
+	for {
+		if err := ctx.Err(); err != nil {
+			return summary, fmt.Errorf("stopped before every due job ran: %w", err)
+		}
+
+		result, err := a.options.Client.Poll(ctx, a.pollRequest())
+		if err != nil {
+			var problem *api.ResponseError
+			failures++
+			rejected := errors.As(err, &problem) && problem.Status == http.StatusUnauthorized
+			if rejected || failures >= oncePollAttempts {
+				return summary, fmt.Errorf("check in with Backproof: %w", err)
+			}
+			a.options.Logger.WarnContext(ctx, "check in with Backproof", slog.Any("error", err))
+			a.sleep(ctx, a.backoff(failures, problem))
+			continue
+		}
+		failures = 0
+		a.noticeVersions(ctx, result)
+
+		if result.UpdateRequired != "" {
+			return summary, errors.New(result.UpdateRequired)
+		}
+		if result.Job == nil {
+			return summary, nil
+		}
+
+		a.claim(result.Job.Id.String())
+		outcome := a.work(jobs, *result.Job)
+		switch outcome.status {
+		case api.JobResultStatusPass:
+			summary.Passed++
+		case api.JobResultStatusFail:
+			summary.Failed++
+		default:
+			summary.Errors++
+		}
+		// A result Backproof never received means the run didn't fully do its job.
+		if !outcome.delivered && outcome.status != api.JobResultStatusError {
+			summary.Errors++
+		}
+	}
+}
+
 func (a *Agent) pollRequest() api.PollRequest {
 	status := api.Idle
 	if !a.hasFreeSlot() {
@@ -173,7 +248,13 @@ func (a *Agent) runningJobs() []string {
 	return jobs
 }
 
-func (a *Agent) work(jobs context.Context, assigned api.Job) {
+// jobOutcome says how a job ended and whether Backproof received its result.
+type jobOutcome struct {
+	status    api.JobResultStatus
+	delivered bool
+}
+
+func (a *Agent) work(jobs context.Context, assigned api.Job) jobOutcome {
 	jobID := assigned.Id.String()
 	defer a.release(jobID)
 	logger := a.options.Logger.With(slog.String("job", jobID), slog.String("source", assigned.Source.Id))
@@ -200,10 +281,11 @@ func (a *Agent) work(jobs context.Context, assigned api.Job) {
 
 	if abandoned.Load() {
 		logger.WarnContext(jobs, "job stopped without a result, because this runner no longer holds it")
-		return
+		return jobOutcome{status: api.JobResultStatusError}
 	}
-	a.submit(jobs, assigned.Id, result, logger)
+	delivered := a.submit(jobs, assigned.Id, result, logger)
 	logger.InfoContext(jobs, "job finished", slog.String("status", string(result.Status)))
+	return jobOutcome{status: result.Status, delivered: delivered}
 }
 
 func (a *Agent) execute(ctx context.Context, assigned api.Job, stage *atomic.Value, logger *slog.Logger) (result api.JobResult) {
@@ -249,23 +331,23 @@ func (a *Agent) heartbeat(ctx context.Context, jobID api.JobId, stage *atomic.Va
 }
 
 // submit keeps trying after a drain or an abort, because the job's work is already done.
-func (a *Agent) submit(jobs context.Context, jobID api.JobId, result api.JobResult, logger *slog.Logger) {
+func (a *Agent) submit(jobs context.Context, jobID api.JobId, result api.JobResult, logger *slog.Logger) bool {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(jobs), resultTimeout)
 	defer cancel()
 
 	for attempt := 1; attempt <= resultAttempts; attempt++ {
 		err := a.options.Client.SubmitResult(ctx, jobID, result)
 		if err == nil {
-			return
+			return true
 		}
 		if errors.Is(err, api.ErrLeaseLost) {
 			logger.WarnContext(ctx, "result not accepted, because this runner no longer holds the job")
-			return
+			return false
 		}
 		var problem *api.ResponseError
 		if errors.As(err, &problem) && !problem.Retryable() {
 			logger.ErrorContext(ctx, "result not accepted", slog.Int("status", problem.Status), slog.String("code", problem.Code))
-			return
+			return false
 		}
 		logger.WarnContext(ctx, "send result", slog.Int("attempt", attempt), slog.Any("error", err))
 		if attempt < resultAttempts {
@@ -273,6 +355,7 @@ func (a *Agent) submit(jobs context.Context, jobID api.JobId, result api.JobResu
 		}
 	}
 	logger.ErrorContext(ctx, "gave up sending the result, so Backproof will run this job again")
+	return false
 }
 
 // sleepWithJitter spreads runners out, so they don't all call the API at the same moment.
