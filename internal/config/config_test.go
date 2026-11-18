@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -263,6 +265,72 @@ func TestLoadSourceSecretsUsesTheUpperCaseSourceID(t *testing.T) {
 
 	if got.AgeIdentity.Reveal() != "test-age-key" || got.GPGKey.Reveal() != "test-gpg-key" || got.GPGPassphrase.Reveal() != "test-passphrase" {
 		t.Errorf("LoadSourceSecrets() did not read the keys of this source")
+	}
+}
+
+func TestLoadSourceSecretsReadsEveryKey(t *testing.T) {
+	got := LoadSourceSecrets(lookupFrom(map[string]string{
+		"BP_SRC_PROD_DB_S3_ACCESS_KEY": "test-access",
+		"BP_SRC_PROD_DB_S3_SECRET_KEY": "test-secret",
+		"BP_SRC_PROD_DB_NAME_SALT":     "test-salt",
+		"BP_SRC_PROD_DB_GPG_KEY":       `first-line\n\nlast-line`,
+	}), "PROD_DB")
+
+	if got.S3AccessKey.Reveal() != "test-access" || got.S3SecretKey.Reveal() != "test-secret" || got.NameSalt.Reveal() != "test-salt" {
+		t.Error("LoadSourceSecrets() did not read the storage keys and salt")
+	}
+	if want := "first-line\n\nlast-line"; got.GPGKey.Reveal() != want {
+		t.Error("LoadSourceSecrets() did not restore the GPG key's line breaks")
+	}
+}
+
+func TestWithEnvFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sources.env")
+	contents := "# local secrets\n\nBP_SRC_A_S3_ACCESS_KEY=from-file\nBP_SRC_A_S3_SECRET_KEY=with=equals\nBP_SRC_A_NAME_SALT=from-file\r\n"
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	lookup, err := WithEnvFile(lookupFrom(map[string]string{"BP_SRC_A_NAME_SALT": "from-environment"}), path)
+	if err != nil {
+		t.Fatalf("WithEnvFile() error = %v", err)
+	}
+
+	for key, want := range map[string]string{
+		"BP_SRC_A_S3_ACCESS_KEY": "from-file",
+		"BP_SRC_A_S3_SECRET_KEY": "with=equals",
+		"BP_SRC_A_NAME_SALT":     "from-environment",
+	} {
+		if got, _ := lookup(key); got != want {
+			t.Errorf("%s = %q, want %q", key, got, want)
+		}
+	}
+}
+
+func TestWithEnvFileAllowsAMissingFile(t *testing.T) {
+	lookup, err := WithEnvFile(lookupFrom(map[string]string{"KEY": "value"}), filepath.Join(t.TempDir(), "missing.env"))
+	if err != nil {
+		t.Fatalf("WithEnvFile() error = %v", err)
+	}
+	if got, _ := lookup("KEY"); got != "value" {
+		t.Errorf("KEY = %q, want the environment's value", got)
+	}
+}
+
+func TestWithEnvFileErrorsNeverContainValues(t *testing.T) {
+	const canary = "test-secret-canary"
+	path := filepath.Join(t.TempDir(), "sources.env")
+	if err := os.WriteFile(path, []byte(canary+"\n"), 0o600); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	_, err := WithEnvFile(lookupFrom(nil), path)
+
+	if err == nil {
+		t.Fatal("WithEnvFile() accepted a line without a key")
+	}
+	if strings.Contains(err.Error(), canary) {
+		t.Errorf("error %q contains the line's value", err)
 	}
 }
 

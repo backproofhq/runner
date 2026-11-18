@@ -14,6 +14,7 @@ All notable changes to the Backproof runner are documented here. The project fol
 - `backproof restore --file` opens backups compressed with gzip or zstd and encrypted with age or GPG.
 - The runner can find the newest matching backup in S3-compatible storage, check that it fits on disk and download it. `BACKPROOF_DISK_MARGIN` sets how much free space is required.
 - Containers and volumes left behind by a killed run are removed the next time the runner starts.
+- `backproof agent` polls Backproof for due jobs, tests the latest backup and reports the result. It finishes running jobs before it stops, and table names leave the runner hashed unless a source allows plain names.
 - `backproof register --token` registers a runner with an install token, creates its key pair and saves its settings to `/etc/backproof/runner.env`.
 - The v1 API contract between the runner and Backproof, in `api/v1/openapi.yaml`. The runner uses `https://api.backproof.dev` by default.
 - `BACKPROOF_MEMORY_LIMIT` and `BACKPROOF_CPU_LIMIT` settings for the throwaway Postgres containers.

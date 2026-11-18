@@ -20,20 +20,20 @@ import (
 // fixtureBackupTime is one day after the newest row in sales.orders.
 var fixtureBackupTime = time.Date(2026, 1, 16, 12, 0, 0, 0, time.UTC)
 
-func fixtureBaseline() []job.TableCount {
-	baseline := make([]job.TableCount, 0, len(fixtureTables))
+func fixtureBaseline() []job.KeyedCount {
+	baseline := make([]job.KeyedCount, 0, len(fixtureTables))
 	for name, rows := range fixtureTables {
-		schema, table, _ := strings.Cut(name, ".")
-		baseline = append(baseline, job.TableCount{Schema: schema, Name: table, Rows: rows})
+		baseline = append(baseline, job.KeyedCount{Key: name, Rows: rows})
 	}
 	return baseline
 }
 
-func baselineWith(schema, table string, rows int64) []job.TableCount {
-	baseline := slices.DeleteFunc(fixtureBaseline(), func(entry job.TableCount) bool {
-		return entry.Schema == schema && entry.Name == table
+func baselineWith(schema, table string, rows int64) []job.KeyedCount {
+	key := schema + "." + table
+	baseline := slices.DeleteFunc(fixtureBaseline(), func(entry job.KeyedCount) bool {
+		return entry.Key == key
 	})
-	return append(baseline, job.TableCount{Schema: schema, Name: table, Rows: rows})
+	return append(baseline, job.KeyedCount{Key: key, Rows: rows})
 }
 
 func timestampCheck(schema, table, column string, maxAge time.Duration) job.Checks {
@@ -48,7 +48,7 @@ func timestampCheck(schema, table, column string, maxAge time.Duration) job.Chec
 }
 
 func TestChecksJudgeRestoredBackups(t *testing.T) {
-	customers := job.TableRef{Schema: "public", Name: "customers"}
+	const customers = "public.customers"
 
 	tests := []struct {
 		name       string
@@ -67,7 +67,7 @@ func TestChecksJudgeRestoredBackups(t *testing.T) {
 		},
 		{
 			name:       "expected table is gone",
-			checks:     job.Checks{ExpectedTables: []job.TableRef{{Schema: "sales", Name: "refunds"}}},
+			checks:     job.Checks{ExpectedTables: []string{"sales.refunds"}},
 			wantStatus: job.StatusFail, wantCode: "table_missing", wantCheck: job.CheckTablesExist, wantTable: "refunds",
 		},
 		{
@@ -85,7 +85,7 @@ func TestChecksJudgeRestoredBackups(t *testing.T) {
 			checks: job.Checks{
 				Baseline:              baselineWith("public", "customers", 100),
 				TolerancePercent:      10,
-				TableTolerancePercent: map[job.TableRef]float64{customers: 99},
+				TableTolerancePercent: map[string]float64{customers: 99},
 			},
 			wantStatus: job.StatusPass,
 		},
@@ -170,7 +170,7 @@ func assertFailedCheck(t *testing.T, result job.Result, name job.CheckName, tabl
 	if table == "" {
 		return
 	}
-	if !slices.ContainsFunc(check.Tables, func(finding job.TableFinding) bool { return finding.Name == table }) {
+	if !slices.ContainsFunc(check.Tables, func(finding job.TableFinding) bool { return strings.HasSuffix(finding.Key, "."+table) }) {
 		t.Errorf("%s findings = %+v, want table %s", name, check.Tables, table)
 	}
 	if strings.Contains(result.Reason, table) {

@@ -1,11 +1,15 @@
 package job
 
 import (
-	"cmp"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"math"
 	"slices"
 	"time"
+
+	"github.com/backproofhq/runner/internal/config"
 )
 
 // CheckName identifies a built-in check.
@@ -40,15 +44,44 @@ type TableRef struct {
 	Name   string
 }
 
+// TableKeyFunc turns a table into the key that identifies it outside the restored database.
+type TableKeyFunc func(TableRef) string
+
+// PlainTableKey identifies a table by its readable name.
+func PlainTableKey(table TableRef) string {
+	return table.Schema + "." + table.Name
+}
+
+// HashedTableKey identifies tables without revealing their names. The salt stops anyone from
+// recovering names by hashing common ones, and the NUL byte keeps schema and table apart.
+func HashedTableKey(salt config.Secret) TableKeyFunc {
+	return func(table TableRef) string {
+		mac := hmac.New(sha256.New, []byte(salt.Reveal()))
+		mac.Write([]byte(table.Schema))
+		mac.Write([]byte{0})
+		mac.Write([]byte(table.Name))
+		return hex.EncodeToString(mac.Sum(nil))
+	}
+}
+
+// KeyedCount is the number of rows in the table with this key.
+type KeyedCount struct {
+	Key  string
+	Rows int64
+}
+
 // Checks configures how a restored backup is judged.
 type Checks struct {
-	ExpectedTables []TableRef
+	// ExpectedTables, Baseline and TableTolerancePercent identify tables by table key.
+	ExpectedTables []string
 	// Baseline holds the row counts of the last passing run. It is empty on a source's first run.
-	Baseline              []TableCount
+	Baseline              []KeyedCount
 	TolerancePercent      float64
-	TableTolerancePercent map[TableRef]float64
+	TableTolerancePercent map[string]float64
 	EstimateRows          bool
 	LatestTimestamp       *TimestampCheck
+	// TableKey defaults to PlainTableKey.
+	TableKey TableKeyFunc
 	// BackupTime is when the backup was made. The file's modification time is used when it is zero.
 	BackupTime time.Time
 }
@@ -90,8 +123,7 @@ type CheckResult struct {
 
 // TableFinding describes what is wrong with one table.
 type TableFinding struct {
-	Schema           string   `json:"schema"`
-	Name             string   `json:"name"`
+	Key              string   `json:"table_key"`
 	Problem          string   `json:"problem"`
 	MeasuredRows     *int64   `json:"measured_rows,omitempty"`
 	ExpectedRows     *int64   `json:"expected_rows,omitempty"`
@@ -107,6 +139,14 @@ func evaluateChecks(checks Checks, tables []TableCount, reading *TimestampReadin
 	}
 }
 
+func (c Checks) keyOf(table TableCount) string {
+	key := c.TableKey
+	if key == nil {
+		key = PlainTableKey
+	}
+	return key(TableRef{Schema: table.Schema, Name: table.Name})
+}
+
 func firstFailure(results []CheckResult) error {
 	for _, result := range results {
 		if result.Status == CheckFailed {
@@ -119,18 +159,16 @@ func firstFailure(results []CheckResult) error {
 func checkTables(checks Checks, tables []TableCount) CheckResult {
 	result := CheckResult{Name: CheckTablesExist, Status: CheckPassed, Measured: tableCount(len(tables))}
 
-	present := make(map[TableRef]struct{}, len(tables))
+	present := make(map[string]struct{}, len(tables))
 	for _, table := range tables {
-		present[TableRef{Schema: table.Schema, Name: table.Name}] = struct{}{}
+		present[checks.keyOf(table)] = struct{}{}
 	}
 
 	required := slices.Clone(checks.ExpectedTables)
 	for _, table := range checks.Baseline {
-		required = append(required, TableRef{Schema: table.Schema, Name: table.Name})
+		required = append(required, table.Key)
 	}
-	slices.SortFunc(required, func(a, b TableRef) int {
-		return cmp.Or(cmp.Compare(a.Schema, b.Schema), cmp.Compare(a.Name, b.Name))
-	})
+	slices.Sort(required)
 	required = slices.Compact(required)
 	if len(required) > 0 {
 		result.Expected = tableCount(len(required))
@@ -138,7 +176,7 @@ func checkTables(checks Checks, tables []TableCount) CheckResult {
 
 	for _, table := range required {
 		if _, ok := present[table]; !ok {
-			result.Tables = append(result.Tables, TableFinding{Schema: table.Schema, Name: table.Name, Problem: ProblemMissing})
+			result.Tables = append(result.Tables, TableFinding{Key: table, Problem: ProblemMissing})
 		}
 	}
 
@@ -162,28 +200,26 @@ func checkRowCounts(checks Checks, tables []TableCount) CheckResult {
 	}
 	result.Expected = fmt.Sprintf("within %g%% of the last passing run", checks.TolerancePercent)
 
-	measured := make(map[TableRef]int64, len(tables))
+	measured := make(map[string]int64, len(tables))
 	for _, table := range tables {
-		measured[TableRef{Schema: table.Schema, Name: table.Name}] = table.Rows
+		measured[checks.keyOf(table)] = table.Rows
 	}
 
 	for _, baseline := range checks.Baseline {
-		ref := TableRef{Schema: baseline.Schema, Name: baseline.Name}
-		rows, ok := measured[ref]
+		rows, ok := measured[baseline.Key]
 		// A table that was empty last time has no percentage to compare, and growing isn't damage.
 		if !ok || baseline.Rows <= 0 {
 			continue
 		}
 
 		tolerance := checks.TolerancePercent
-		if override, ok := checks.TableTolerancePercent[ref]; ok {
+		if override, ok := checks.TableTolerancePercent[baseline.Key]; ok {
 			tolerance = override
 		}
 		change := math.Abs(float64(rows-baseline.Rows)) / float64(baseline.Rows) * 100
 		if change > tolerance {
 			result.Tables = append(result.Tables, TableFinding{
-				Schema:           ref.Schema,
-				Name:             ref.Name,
+				Key:              baseline.Key,
 				Problem:          ProblemRowCountChanged,
 				MeasuredRows:     &rows,
 				ExpectedRows:     &baseline.Rows,
