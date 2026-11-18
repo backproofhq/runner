@@ -1,0 +1,46 @@
+# Tests your latest backups with the Backproof runner.
+#
+# 1. Create a CI token on the Add runner page at https://app.backproof.dev.
+# 2. Save it as a masked CI/CD variable named BACKPROOF_TOKEN.
+# 3. Include this file in your .gitlab-ci.yml and add a pipeline schedule.
+#
+# The schedule has to run at least as often as your most frequent backup test.
+# The job fails when a backup fails or when the runner can't do its job.
+
+backproof:
+  image: docker:29.10.0-cli@sha256:34507eb5069d8be82c95dd3b6987d4250fd5fee49b82e2509b7d7a7030740d6d
+  services:
+    - name: docker:29.10.0-dind@sha256:4bbc7223f81db790097c6dea42fb93e05b8fead4f0431fbe6ccaba6e8473201c
+      alias: docker
+  variables:
+    DOCKER_HOST: tcp://docker:2376
+    DOCKER_TLS_CERTDIR: /certs
+    DOCKER_TLS_VERIFY: "1"
+    DOCKER_CERT_PATH: /certs/client
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+    - if: $CI_PIPELINE_SOURCE == "web"
+  script:
+    - |
+      if [ -z "${BACKPROOF_TOKEN:-}" ]; then
+        echo "BACKPROOF_TOKEN is not set. Create a CI token on the Add runner page and save it as a CI/CD variable. A protected variable only reaches protected branches." >&2
+        exit 2
+      fi
+
+      attempts=0
+      until docker info >/dev/null 2>&1; do
+        attempts=$((attempts + 1))
+        if [ "$attempts" -ge 30 ]; then
+          echo "Docker did not start. Use a GitLab runner that allows privileged containers, which Docker-in-Docker needs." >&2
+          exit 2
+        fi
+        sleep 2
+      done
+
+      # Passing only the names keeps secret values out of the command line.
+      set --
+      for name in $(env | sed -n -e 's/^\(BACKPROOF_[A-Z0-9_]*\)=.*/\1/p' -e 's/^\(BP_SRC_[A-Z0-9_]*\)=.*/\1/p'); do
+        set -- "$@" --env "$name"
+      done
+
+      docker run --rm --volume /var/run/docker.sock:/var/run/docker.sock "$@" backproofhq/runner:latest run --once

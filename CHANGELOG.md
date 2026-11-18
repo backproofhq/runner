@@ -15,6 +15,7 @@ All notable changes to the Backproof runner are documented here. The project fol
 - The runner can find the newest matching backup in S3-compatible storage, check that it fits on disk and download it. `BACKPROOF_DISK_MARGIN` sets how much free space is required.
 - Containers and volumes left behind by a killed run are removed the next time the runner starts.
 - `backproof run --once` runs the jobs that are due and exits with `0` when all passed, `1` when a backup failed and `2` when the runner couldn't do its job.
+- A GitLab CI template, `ci/gitlab/backproof.gitlab-ci.yml`, that runs due backup tests on a pipeline schedule.
 - CI jobs need one secret: `BACKPROOF_TOKEN` accepts a CI token that also holds the runner's private key, which never leaves the job.
 - The agent opens keys sealed for it in the dashboard. Local secrets take precedence over sealed keys.
 - `backproof agent` polls Backproof for due jobs, tests the latest backup and reports the result. It finishes running jobs before it stops, and table names leave the runner hashed unless a source allows plain names.
