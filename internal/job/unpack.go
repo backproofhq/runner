@@ -28,6 +28,8 @@ type Options struct {
 	WorkDir  string
 	SourceID string
 	Secrets  config.SourceSecrets
+	// DiskMargin is how many times the backup's size must be free before downloading it.
+	DiskMargin float64
 }
 
 func jobDirectory(workDir, jobID string) string {
@@ -153,34 +155,35 @@ func damagedArchive(error) error {
 func writeUnpacked(source io.Reader, layers *layerChain, workDir, jobID string, format archive.Format) (Dump, error) {
 	directory := jobDirectory(workDir, jobID)
 	if err := os.MkdirAll(directory, 0o700); err != nil {
-		return Dump{}, unavailable(err)
+		return Dump{}, WorkFileFailure(err)
 	}
 	path := filepath.Join(directory, "backup")
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600) //nolint:gosec // The path is built from the runner's own work directory.
 	if err != nil {
-		return Dump{}, unavailable(err)
+		return Dump{}, WorkFileFailure(err)
 	}
 	defer func() { _ = file.Close() }()
 
 	output := &trackedWriter{writer: file}
 	if _, err := io.Copy(output, source); err != nil {
 		if output.err != nil {
-			return Dump{}, unavailable(output.err)
+			return Dump{}, WorkFileFailure(output.err)
 		}
 		return Dump{}, layers.failure(err, damagedArchive)
 	}
 	if err := file.Sync(); err != nil {
-		return Dump{}, unavailable(err)
+		return Dump{}, WorkFileFailure(err)
 	}
 
 	info, err := file.Stat()
 	if err != nil {
-		return Dump{}, unavailable(err)
+		return Dump{}, WorkFileFailure(err)
 	}
 	return finishDump(file, info.Size(), Dump{Path: path, Format: format})
 }
 
-func unavailable(err error) error {
+// WorkFileFailure explains why the runner couldn't write to its work directory.
+func WorkFileFailure(err error) error {
 	if errors.Is(err, syscall.ENOSPC) {
 		return RunnerError("disk_full", "The work directory ran out of disk space while unpacking the backup. Free some space and run it again.", err)
 	}

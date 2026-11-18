@@ -25,6 +25,9 @@ type Stage string
 
 // Pipeline stages, in the order they run.
 const (
+	StageResolve       Stage = "resolve"
+	StagePreflight     Stage = "preflight"
+	StageDownload      Stage = "download"
 	StageDecrypt       Stage = "decrypt"
 	StageDecompress    Stage = "decompress"
 	StageDetectVersion Stage = "detect_version"
@@ -59,6 +62,7 @@ type Result struct {
 // Backup describes the file that was tested.
 type Backup struct {
 	File            string         `json:"file"`
+	ObjectKey       string         `json:"object_key,omitempty"`
 	SizeBytes       int64          `json:"size_bytes"`
 	Time            time.Time      `json:"time,omitzero"`
 	Format          archive.Format `json:"format,omitempty"`

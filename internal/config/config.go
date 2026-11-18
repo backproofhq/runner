@@ -24,6 +24,7 @@ const (
 	EnvLogLevel    = "BACKPROOF_LOG_LEVEL"
 	EnvMemoryLimit = "BACKPROOF_MEMORY_LIMIT"
 	EnvCPULimit    = "BACKPROOF_CPU_LIMIT"
+	EnvDiskMargin  = "BACKPROOF_DISK_MARGIN"
 )
 
 // Defaults for settings that are not set in the environment.
@@ -32,12 +33,15 @@ const (
 	DefaultConcurrency = 1
 	DefaultWorkDir     = "/var/lib/backproof"
 	DefaultLogLevel    = slog.LevelInfo
+	DefaultDiskMargin  = 3.0
 )
 
 const (
 	minMemoryLimit = 64 * 1024 * 1024
 	minCPULimit    = 0.01
 	maxCPULimit    = 4096
+	minDiskMargin  = 1
+	maxDiskMargin  = 1000
 )
 
 var (
@@ -64,6 +68,8 @@ type Config struct {
 	// Zero means no limit.
 	MemoryLimitBytes int64
 	CPULimitNanos    int64
+	// DiskMargin is how many times the backup's size must be free before downloading it.
+	DiskMargin float64
 }
 
 // SourceSecrets holds the local decryption keys of one backup source.
@@ -120,6 +126,7 @@ func Load(lookup LookupFunc) (Config, error) {
 		Concurrency: DefaultConcurrency,
 		WorkDir:     DefaultWorkDir,
 		LogLevel:    DefaultLogLevel,
+		DiskMargin:  DefaultDiskMargin,
 	}
 
 	var errs []error
@@ -169,6 +176,14 @@ func Load(lookup LookupFunc) (Config, error) {
 			errs = append(errs, err)
 		}
 		cfg.CPULimitNanos = limit
+	}
+
+	if raw := get(EnvDiskMargin); raw != "" {
+		margin, err := strconv.ParseFloat(raw, 64)
+		if err != nil || math.IsNaN(margin) || margin < minDiskMargin || margin > maxDiskMargin {
+			errs = append(errs, errors.New(EnvDiskMargin+" is not valid: set it to a number from 1 to 1000, such as 3"))
+		}
+		cfg.DiskMargin = margin
 	}
 
 	if err := errors.Join(errs...); err != nil {

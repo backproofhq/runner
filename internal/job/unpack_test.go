@@ -400,8 +400,34 @@ func TestUnwritableWorkDirIsARunnerError(t *testing.T) {
 	}
 }
 
+func TestPreflightRefusesABackupThatCannotFit(t *testing.T) {
+	workDir := t.TempDir()
+
+	if err := preflight(workDir, "fits", 1024, 3); err != nil {
+		t.Errorf("preflight() error = %v, want a small backup to fit", err)
+	}
+
+	err := preflight(workDir, "too-big", 1<<62, 3)
+	failure := asFailure(context.Background(), err)
+	if failure.Status != StatusError || failure.Code != "disk_too_small" {
+		t.Fatalf("failure = %s (%s), want a runner error", failure.Status, failure.Code)
+	}
+	if !strings.Contains(failure.Reason, config.EnvDiskMargin) {
+		t.Errorf("reason %q does not say what to change", failure.Reason)
+	}
+
+	blocked := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(blocked, nil, 0o600); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	failure = asFailure(context.Background(), preflight(blocked, "job", 1024, 3))
+	if failure.Status != StatusError || failure.Code != "work_dir_unavailable" {
+		t.Errorf("failure = %s (%s), want an unavailable work directory", failure.Status, failure.Code)
+	}
+}
+
 func TestFullDiskIsARunnerError(t *testing.T) {
-	failure := asFailure(context.Background(), unavailable(fmt.Errorf("write backup: %w", syscall.ENOSPC)))
+	failure := asFailure(context.Background(), WorkFileFailure(fmt.Errorf("write backup: %w", syscall.ENOSPC)))
 	if failure.Status != StatusError || failure.Code != "disk_full" {
 		t.Errorf("failure = %s (%s), want a disk full runner error", failure.Status, failure.Code)
 	}

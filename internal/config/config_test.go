@@ -160,6 +160,26 @@ func TestLoadContainerLimits(t *testing.T) {
 	}
 }
 
+func TestLoadDiskMargin(t *testing.T) {
+	cfg, err := Load(lookupFrom(nil))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.DiskMargin != 3 {
+		t.Errorf("DiskMargin = %g, want 3 by default", cfg.DiskMargin)
+	}
+
+	for value, want := range map[string]float64{"1": 1, "1.5": 1.5, "10": 10, "1000": 1000} {
+		cfg, err := Load(lookupFrom(map[string]string{EnvDiskMargin: value}))
+		if err != nil {
+			t.Errorf("disk margin %q: %v", value, err)
+		}
+		if cfg.DiskMargin != want {
+			t.Errorf("disk margin %q = %g, want %g", value, cfg.DiskMargin, want)
+		}
+	}
+}
+
 func TestLoadRejectsInvalidValues(t *testing.T) {
 	tests := []struct {
 		key   string
@@ -187,6 +207,13 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		{EnvCPULimit, "two"},
 		{EnvCPULimit, "NaN"},
 		{EnvCPULimit, "Inf"},
+		{EnvDiskMargin, "0.5"},
+		{EnvDiskMargin, "0"},
+		{EnvDiskMargin, "-3"},
+		{EnvDiskMargin, "1001"},
+		{EnvDiskMargin, "three"},
+		{EnvDiskMargin, "NaN"},
+		{EnvDiskMargin, "Inf"},
 	}
 	for _, test := range tests {
 		t.Run(test.key+"="+test.value, func(t *testing.T) {

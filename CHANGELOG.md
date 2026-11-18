@@ -12,5 +12,6 @@ All notable changes to the Backproof runner are documented here. The project fol
 - A development command, `backproof restore --file`, that restores a plain SQL or custom-format dump from Postgres 14 to 18 in a throwaway container and prints the result as JSON.
 - Backup checks that fail a restored backup when tables are missing, row counts move past their tolerance or the newest row is too old.
 - `backproof restore --file` opens backups compressed with gzip or zstd and encrypted with age or GPG.
+- The runner can find the newest matching backup in S3-compatible storage, check that it fits on disk and download it. `BACKPROOF_DISK_MARGIN` sets how much free space is required.
 - Containers and volumes left behind by a killed run are removed the next time the runner starts.
 - `BACKPROOF_MEMORY_LIMIT` and `BACKPROOF_CPU_LIMIT` settings for the throwaway Postgres containers.

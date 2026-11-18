@@ -15,6 +15,7 @@ The runner is configured through environment variables. An empty variable counts
 | `BACKPROOF_LOG_LEVEL` | How much the runner logs | `info` | `debug`, `info`, `warn` or `error` |
 | `BACKPROOF_MEMORY_LIMIT` | Memory each throwaway Postgres container may use, with no swap | No limit | A whole number of bytes, or a number followed by `k`, `m`, `g` or `t`. At least `64m` |
 | `BACKPROOF_CPU_LIMIT` | CPUs each throwaway Postgres container may use | No limit | A number of `0.01` or more, such as `1.5` |
+| `BACKPROOF_DISK_MARGIN` | How many times the backup's size must be free in the work directory before it is downloaded. Leave room for decompression | `3` | A number from `1` to `1000` |
 
 CI users only set `BACKPROOF_TOKEN`.
 
