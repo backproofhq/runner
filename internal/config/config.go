@@ -66,6 +66,41 @@ type Config struct {
 	CPULimitNanos    int64
 }
 
+// SourceSecrets holds the local decryption keys of one backup source.
+type SourceSecrets struct {
+	AgeIdentity   Secret
+	GPGKey        Secret
+	GPGPassphrase Secret
+}
+
+// EnvSourceAgeIdentity names the variable holding a source's age private key.
+func EnvSourceAgeIdentity(sourceID string) string {
+	return "BP_SRC_" + strings.ToUpper(sourceID) + "_AGE_IDENTITY"
+}
+
+// EnvSourceGPGKey names the variable holding a source's GPG private key.
+func EnvSourceGPGKey(sourceID string) string {
+	return "BP_SRC_" + strings.ToUpper(sourceID) + "_GPG_KEY"
+}
+
+// EnvSourceGPGPassphrase names the variable holding the passphrase of a source's GPG key.
+func EnvSourceGPGPassphrase(sourceID string) string {
+	return "BP_SRC_" + strings.ToUpper(sourceID) + "_GPG_PASSPHRASE"
+}
+
+// LoadSourceSecrets reads the local decryption keys of a backup source.
+func LoadSourceSecrets(lookup LookupFunc, sourceID string) SourceSecrets {
+	get := func(key string) Secret {
+		value, _ := lookup(key)
+		return NewSecret(strings.TrimSpace(value))
+	}
+	return SourceSecrets{
+		AgeIdentity:   get(EnvSourceAgeIdentity(sourceID)),
+		GPGKey:        get(EnvSourceGPGKey(sourceID)),
+		GPGPassphrase: get(EnvSourceGPGPassphrase(sourceID)),
+	}
+}
+
 // LookupFunc reads one environment variable. os.LookupEnv satisfies it.
 type LookupFunc func(key string) (string, bool)
 

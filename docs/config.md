@@ -11,7 +11,7 @@ The runner is configured through environment variables. An empty variable counts
 | `BACKPROOF_API_URL` | Address of the Backproof API | `https://app.backproof.dev` | An `https://` address without credentials, a query or a fragment. `http://` is accepted only for `localhost` and loopback addresses, for local development |
 | `BACKPROOF_NAME` | Runner name shown in the dashboard | None | Any text |
 | `BACKPROOF_CONCURRENCY` | Jobs at a time | `1` | A whole number of 1 or more |
-| `BACKPROOF_WORK_DIR` | Directory for temporary files | `/var/lib/backproof` | An absolute path |
+| `BACKPROOF_WORK_DIR` | Directory for temporary files, including unpacked backups. They are deleted when the job ends | `/var/lib/backproof` | An absolute path |
 | `BACKPROOF_LOG_LEVEL` | How much the runner logs | `info` | `debug`, `info`, `warn` or `error` |
 | `BACKPROOF_MEMORY_LIMIT` | Memory each throwaway Postgres container may use, with no swap | No limit | A whole number of bytes, or a number followed by `k`, `m`, `g` or `t`. At least `64m` |
 | `BACKPROOF_CPU_LIMIT` | CPUs each throwaway Postgres container may use | No limit | A number of `0.01` or more, such as `1.5` |
@@ -29,7 +29,7 @@ CI users only set `BACKPROOF_TOKEN`.
 
 ## Local secrets
 
-> **Not read yet.** These variables take effect when backup sources are added.
+> **Partly read.** The development command `backproof restore --file` reads the age and GPG variables with the source ID `LOCAL`, for example `BP_SRC_LOCAL_AGE_IDENTITY`. The other variables take effect when backup sources are added.
 
 Teams that want no secret to pass through Backproof can set these in `/etc/backproof/sources.env`, or as CI secrets with the same names. Local secrets take precedence over keys sealed in the dashboard.
 
