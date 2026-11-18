@@ -372,13 +372,50 @@ type agentProcess struct {
 // startAgentProcess runs the real binary, so the test covers how it handles signals.
 func startAgentProcess(t *testing.T, apiURL string, identity *age.X25519Identity) *agentProcess {
 	t.Helper()
+	binary := buildBackproof(t)
+	runner := runnerForIdentity(t, identity)
+
+	command := exec.CommandContext(context.WithoutCancel(t.Context()), binary, "agent") //nolint:gosec // The test built this binary.
+	command.Env = processEnv(t, apiURL, identity, runner.workDir)
+	if err := command.Start(); err != nil {
+		t.Fatalf("start agent: %v", err)
+	}
+	process := &agentProcess{command: command, runner: runner, exited: make(chan struct{})}
+	go func() {
+		process.err = command.Wait()
+		close(process.exited)
+	}()
+	t.Cleanup(func() {
+		_ = command.Process.Kill()
+		<-process.exited
+	})
+	return process
+}
+
+func buildBackproof(t *testing.T) string {
+	t.Helper()
 	binary := filepath.Join(t.TempDir(), "backproof")
 	build := exec.CommandContext(t.Context(), "go", "build", "-o", binary, "./cmd/backproof") //nolint:gosec // The output path is the test's own temp directory.
 	build.Dir = ".."
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("go build: %v\n%s", err, output)
 	}
+	return binary
+}
 
+func processEnv(t *testing.T, apiURL string, identity *age.X25519Identity, workDir string) []string {
+	t.Helper()
+	return append(os.Environ(),
+		config.EnvToken+"=bp_run_"+randomID(t),
+		config.EnvRunnerKey+"="+identity.String(),
+		config.EnvAPIURL+"="+apiURL,
+		config.EnvWorkDir+"="+workDir,
+	)
+}
+
+// runnerForIdentity inspects what a binary with this runner key creates.
+func runnerForIdentity(t *testing.T, identity *age.X25519Identity) *testRunner {
+	t.Helper()
 	runnerID, err := crypto.RunnerID(config.NewSecret(identity.String()))
 	if err != nil {
 		t.Fatalf("derive runner id: %v", err)
@@ -397,31 +434,7 @@ func startAgentProcess(t *testing.T, apiURL string, identity *age.X25519Identity
 		_ = inspector.Close()
 	})
 
-	workDir := t.TempDir()
-	command := exec.CommandContext(context.WithoutCancel(t.Context()), binary, "agent") //nolint:gosec // The test built this binary.
-	command.Env = append(os.Environ(),
-		config.EnvToken+"=bp_run_"+randomID(t),
-		config.EnvRunnerKey+"="+identity.String(),
-		config.EnvAPIURL+"="+apiURL,
-		config.EnvWorkDir+"="+workDir,
-	)
-	if err := command.Start(); err != nil {
-		t.Fatalf("start agent: %v", err)
-	}
-	process := &agentProcess{
-		command: command,
-		runner:  &testRunner{id: runnerID, docker: dockerClient, api: inspector, workDir: workDir},
-		exited:  make(chan struct{}),
-	}
-	go func() {
-		process.err = command.Wait()
-		close(process.exited)
-	}()
-	t.Cleanup(func() {
-		_ = command.Process.Kill()
-		<-process.exited
-	})
-	return process
+	return &testRunner{id: runnerID, docker: dockerClient, api: inspector, workDir: t.TempDir()}
 }
 
 func (p *agentProcess) signal(t *testing.T) {
