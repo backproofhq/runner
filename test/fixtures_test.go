@@ -77,9 +77,10 @@ var fixtureTables = map[string]int64{
 
 // testRunner gives each test its own runner label, so tests can't see each other's containers.
 type testRunner struct {
-	id     string
-	docker *docker.Client
-	api    *client.Client
+	id      string
+	docker  *docker.Client
+	api     *client.Client
+	workDir string
 }
 
 func newTestRunner(t *testing.T) *testRunner {
@@ -98,7 +99,7 @@ func newTestRunner(t *testing.T) *testRunner {
 		_ = dockerClient.Close()
 		_ = api.Close()
 	})
-	return &testRunner{id: id, docker: dockerClient, api: api}
+	return &testRunner{id: id, docker: dockerClient, api: api, workDir: t.TempDir()}
 }
 
 func (r *testRunner) restore(t *testing.T, path string) job.Result {
@@ -113,8 +114,15 @@ func (r *testRunner) restoreWithChecks(t *testing.T, path string, checks job.Che
 
 func (r *testRunner) restoreWithContext(ctx context.Context, t *testing.T, path string, checks job.Checks) job.Result {
 	t.Helper()
+	return r.restoreWithOptions(ctx, t, path, job.Options{Checks: checks})
+}
+
+func (r *testRunner) restoreWithOptions(ctx context.Context, t *testing.T, path string, options job.Options) job.Result {
+	t.Helper()
+	options.WorkDir = r.workDir
+	options.SourceID = "LOCAL"
 	logger := slog.New(slog.DiscardHandler)
-	return job.RunLocal(ctx, postgres.New(r.docker, docker.Limits{}), logger, randomID(t), path, checks)
+	return job.RunLocal(ctx, postgres.New(r.docker, docker.Limits{}), logger, randomID(t), path, options)
 }
 
 func (r *testRunner) labels(jobID string) map[string]string {

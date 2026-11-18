@@ -3,6 +3,7 @@ package job
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -45,7 +46,8 @@ type Instance interface {
 }
 
 // RunLocal tests a backup file on this machine and always removes what it created.
-func RunLocal(ctx context.Context, engine Engine, logger *slog.Logger, jobID, path string, checks Checks) (result Result) {
+func RunLocal(ctx context.Context, engine Engine, logger *slog.Logger, jobID, path string, options Options) (result Result) {
+	checks := options.Checks
 	result = Result{
 		SchemaVersion: schemaVersion,
 		Status:        StatusPass,
@@ -61,14 +63,18 @@ func RunLocal(ctx context.Context, engine Engine, logger *slog.Logger, jobID, pa
 	}
 
 	// A killed runner can't clean up after itself, so the next run does it.
-	removeOrphans(ctx, engine, logger, jobID)
+	removeOrphans(ctx, engine, logger, options.WorkDir, jobID)
 
 	defer func() {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
 		defer cancel()
 		err := result.timed(StageCleanup, func() error {
-			removeOrphans(cleanupCtx, engine, logger, jobID)
-			return engine.Cleanup(cleanupCtx, jobID)
+			removeOrphans(cleanupCtx, engine, logger, options.WorkDir, jobID)
+			var removeFiles error
+			if options.WorkDir != "" {
+				removeFiles = os.RemoveAll(jobDirectory(options.WorkDir, jobID))
+			}
+			return errors.Join(removeFiles, engine.Cleanup(cleanupCtx, jobID))
 		})
 		if err == nil {
 			return
@@ -77,7 +83,7 @@ func RunLocal(ctx context.Context, engine Engine, logger *slog.Logger, jobID, pa
 		if result.Status == StatusPass {
 			result.stop(cleanupCtx, logger, StageCleanup, RunnerError(
 				"cleanup_failed",
-				"The backup passed, but its container could not be removed. Remove containers labelled dev.backproof.job="+jobID+".",
+				"The backup passed, but its files or container could not be removed. Remove containers labelled dev.backproof.job="+jobID+" and clear the work directory.",
 				err,
 			))
 		}
@@ -86,7 +92,7 @@ func RunLocal(ctx context.Context, engine Engine, logger *slog.Logger, jobID, pa
 	var dump Dump
 	err := result.timed(StageDecompress, func() error {
 		var err error
-		dump, err = inspectDump(path, &result.Backup)
+		dump, err = prepareDump(ctx, path, jobID, options, &result.Backup)
 		return err
 	})
 	if err != nil {
@@ -157,62 +163,11 @@ func RunLocal(ctx context.Context, engine Engine, logger *slog.Logger, jobID, pa
 }
 
 // removeOrphans only logs failures, because leftovers from another run say nothing about this backup.
-func removeOrphans(ctx context.Context, engine Engine, logger *slog.Logger, jobID string) {
+func removeOrphans(ctx context.Context, engine Engine, logger *slog.Logger, workDir, jobID string) {
 	if err := engine.RemoveOrphans(ctx, jobID); err != nil {
 		logger.WarnContext(ctx, "remove leftover containers", slog.Any("error", err))
 	}
-}
-
-func inspectDump(path string, backup *Backup) (Dump, error) {
-	unreadable := func(err error) error {
-		return RunnerError("file_unreadable", "The backup file could not be read. Check the path and its permissions.", err)
-	}
-
-	file, err := os.Open(path) //nolint:gosec // The person running the command chooses this file.
-	if err != nil {
-		return Dump{}, unreadable(err)
-	}
-	defer func() { _ = file.Close() }()
-
-	info, err := file.Stat()
-	if err != nil {
-		return Dump{}, unreadable(err)
-	}
-	if !info.Mode().IsRegular() {
-		return Dump{}, unreadable(fmt.Errorf("%s is not a regular file", filepath.Base(path)))
-	}
-	backup.SizeBytes = info.Size()
-	backup.Time = info.ModTime().UTC()
-
-	format, err := archive.Sniff(file)
-	if err != nil {
-		return Dump{}, unreadable(err)
-	}
-	backup.Format = format
-
-	switch format {
-	case archive.FormatPlain:
-		truncated, err := archive.PlainDumpTruncated(file, info.Size())
-		if err != nil {
-			return Dump{}, unreadable(err)
-		}
-		if truncated {
-			return Dump{}, Fail("truncated_backup", "The backup file ends before pg_dump finished writing it. Check the job that creates your backups.")
-		}
-		return Dump{Path: path, Format: format}, nil
-	case archive.FormatCustom:
-		return Dump{Path: path, Format: format}, nil
-	case archive.FormatEmpty:
-		return Dump{}, Fail("empty_backup", "The backup file is empty. Check the job that creates your backups.")
-	case archive.FormatGzip, archive.FormatZstd, archive.FormatAge, archive.FormatPGP:
-		return Dump{}, RunnerError(
-			"format_not_supported",
-			fmt.Sprintf("This build can't open %s backups yet. Decompress or decrypt the file first.", format),
-			nil,
-		)
-	default:
-		return Dump{}, Fail("unknown_format", "The file isn't a Postgres plain SQL or custom-format dump. Check the job that creates your backups.")
-	}
+	removeStaleWorkFiles(ctx, logger, workDir, jobID)
 }
 
 func (r *Result) addVersionNotes(version Version) {
@@ -233,6 +188,9 @@ func (r *Result) timed(stage Stage, run func() error) error {
 
 func (r *Result) stop(ctx context.Context, logger *slog.Logger, stage Stage, err error) {
 	failure := asFailure(ctx, err)
+	if failure.Stage != "" {
+		stage = failure.Stage
+	}
 	r.Status = failure.Status
 	r.Stage = stage
 	r.ReasonCode = failure.Code

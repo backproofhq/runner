@@ -54,6 +54,10 @@ func TestSniff(t *testing.T) {
 		{"age", []byte("age-encryption.org/v1\n-> X25519"), FormatAge},
 		{"armored age", []byte("-----BEGIN AGE ENCRYPTED FILE-----\n"), FormatAge},
 		{"armored pgp", []byte("-----BEGIN PGP MESSAGE-----\n"), FormatPGP},
+		{"binary pgp to a public key", []byte{0xc1, 0x4c, 0x03, 0xab, 0xcd}, FormatPGP},
+		{"binary pgp in the old packet format", []byte{0x85, 0x01, 0x0c, 0x03, 0xab}, FormatPGP},
+		{"binary pgp to a passphrase", []byte{0xc3, 0x0d, 0x04, 0x09, 0x03}, FormatPGP},
+		{"binary data that resembles pgp", []byte{0xc1, 0x4c, 0x7f, 0x00, 0xcd}, FormatUnknown},
 		{"binary data", []byte{0x00, 0x01, 0x02, 0xff}, FormatUnknown},
 		{"text that turns binary", append([]byte(strings.Repeat("a", 100)), 0x00), FormatUnknown},
 	}

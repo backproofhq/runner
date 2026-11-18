@@ -21,6 +21,7 @@ import (
 
 const (
 	localRunnerID = "local"
+	localSourceID = "LOCAL"
 	// An abstract socket disappears with its process, so a killed run can't leave the lock held.
 	localRestoreLock = "@backproof-local-restore"
 )
@@ -57,7 +58,11 @@ func newRestoreCommand(stdout, stderr io.Writer, lookup config.LookupFunc) *cobr
 
 			logger := newLogger(stderr, cfg.LogLevel)
 			limits := docker.Limits{MemoryBytes: cfg.MemoryLimitBytes, NanoCPUs: cfg.CPULimitNanos}
-			result := job.RunLocal(cmd.Context(), postgres.New(client, limits), logger, hex.EncodeToString(id), file, job.Checks{})
+			result := job.RunLocal(cmd.Context(), postgres.New(client, limits), logger, hex.EncodeToString(id), file, job.Options{
+				WorkDir:  cfg.WorkDir,
+				SourceID: localSourceID,
+				Secrets:  config.LoadSourceSecrets(lookup, localSourceID),
+			})
 
 			encoder := json.NewEncoder(stdout)
 			encoder.SetIndent("", "  ")

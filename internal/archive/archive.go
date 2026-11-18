@@ -3,9 +3,12 @@ package archive
 
 import (
 	"bytes"
+	"compress/gzip"
 	"errors"
 	"fmt"
 	"io"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 // Format is the kind of file a backup turned out to be.
@@ -24,7 +27,8 @@ const (
 )
 
 const (
-	sniffSize         = 8 * 1024
+	// SniffSize is how many bytes SniffBytes needs to recognise a format.
+	SniffSize         = 8 * 1024
 	plainFooterWindow = 4 * 1024
 	plainDumpHeader   = "-- PostgreSQL database dump"
 	plainDumpFooter   = "-- PostgreSQL database dump complete"
@@ -44,32 +48,93 @@ var signatures = []struct {
 
 // Sniff detects the format from the first bytes of r, because file extensions can't be trusted.
 func Sniff(r io.Reader) (Format, error) {
-	sample := make([]byte, sniffSize)
+	sample := make([]byte, SniffSize)
 	n, err := io.ReadFull(r, sample)
 	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
 		return FormatUnknown, fmt.Errorf("read backup header: %w", err)
 	}
-	sample = sample[:n]
+	return SniffBytes(sample[:n]), nil
+}
 
+// SniffBytes detects the format from the first bytes of a file.
+func SniffBytes(sample []byte) Format {
 	if len(sample) == 0 {
-		return FormatEmpty, nil
+		return FormatEmpty
 	}
 	for _, signature := range signatures {
 		if bytes.HasPrefix(sample, signature.prefix) {
-			return signature.format, nil
+			return signature.format
 		}
 	}
-	if bytes.IndexByte(sample, 0) >= 0 {
-		return FormatUnknown, nil
+	if isBinaryPGP(sample) {
+		return FormatPGP
 	}
-	return FormatPlain, nil
+	if bytes.IndexByte(sample, 0) >= 0 {
+		return FormatUnknown
+	}
+	return FormatPlain
+}
+
+// isBinaryPGP looks for the packet that starts every encrypted OpenPGP message: a session key
+// encrypted to a public key (tag 1) or a passphrase (tag 3), followed by a known packet version.
+func isBinaryPGP(sample []byte) bool {
+	if len(sample) < 4 || sample[0]&0x80 == 0 {
+		return false
+	}
+
+	var tag byte
+	var header int
+	if sample[0]&0x40 != 0 {
+		tag = sample[0] & 0x3f
+		header = 2
+		if sample[1] >= 192 && sample[1] < 224 {
+			header = 3
+		}
+	} else {
+		tag = sample[0] >> 2 & 0x0f
+		header = 1 << (sample[0] & 0x03)
+		header++
+	}
+	if header >= len(sample) {
+		return false
+	}
+
+	version := sample[header]
+	switch tag {
+	case 1:
+		return version == 3 || version == 6
+	case 3:
+		return version == 4 || version == 5 || version == 6
+	default:
+		return false
+	}
+}
+
+// Decompress returns a reader for gzip or zstd data. Damaged data is reported while reading.
+func Decompress(format Format, compressed io.Reader) (io.ReadCloser, error) {
+	switch format {
+	case FormatGzip:
+		reader, err := gzip.NewReader(compressed)
+		if err != nil {
+			return nil, fmt.Errorf("read gzip header: %w", err)
+		}
+		return reader, nil
+	case FormatZstd:
+		reader, err := zstd.NewReader(compressed)
+		if err != nil {
+			return nil, fmt.Errorf("read zstd header: %w", err)
+		}
+		return reader.IOReadCloser(), nil
+	default:
+		return nil, fmt.Errorf("format %s is not compressed", format)
+	}
 }
 
 // PlainDumpTruncated reports whether a pg_dump plain file lost its end. psql exits successfully on
 // such a file, because it can't tell a short file from a finished one. Only pg_dump's own output
 // has the footer, so SQL files without its header are never reported.
 func PlainDumpTruncated(file io.ReaderAt, size int64) (bool, error) {
-	head, err := readSection(file, 0, min(size, sniffSize))
+	head, err := readSection(file, 0, min(size, SniffSize))
 	if err != nil {
 		return false, fmt.Errorf("read backup header: %w", err)
 	}

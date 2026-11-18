@@ -226,6 +226,19 @@ func TestLoadErrorsNeverContainRejectedValues(t *testing.T) {
 	})
 }
 
+func TestLoadSourceSecretsUsesTheUpperCaseSourceID(t *testing.T) {
+	got := LoadSourceSecrets(lookupFrom(map[string]string{
+		"BP_SRC_PROD_DB_AGE_IDENTITY":   " test-age-key\n",
+		"BP_SRC_PROD_DB_GPG_KEY":        "test-gpg-key",
+		"BP_SRC_PROD_DB_GPG_PASSPHRASE": "test-passphrase",
+		"BP_SRC_OTHER_AGE_IDENTITY":     "test-other-key",
+	}), "prod_db")
+
+	if got.AgeIdentity.Reveal() != "test-age-key" || got.GPGKey.Reveal() != "test-gpg-key" || got.GPGPassphrase.Reveal() != "test-passphrase" {
+		t.Errorf("LoadSourceSecrets() did not read the keys of this source")
+	}
+}
+
 func TestSecretIsRedactedEverywhere(t *testing.T) {
 	const value = "test-secret-value"
 	secret := NewSecret(value)

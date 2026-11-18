@@ -132,7 +132,7 @@ func TestKilledRunnerHelper(t *testing.T) {
 		t.Fatalf("create docker client: %v", err)
 	}
 	logger := slog.New(slog.DiscardHandler)
-	job.RunLocal(context.Background(), postgres.New(dockerClient, docker.Limits{}), logger, randomID(t), os.Getenv(helperDumpEnv), job.Checks{})
+	job.RunLocal(context.Background(), postgres.New(dockerClient, docker.Limits{}), logger, randomID(t), os.Getenv(helperDumpEnv), job.Options{})
 }
 
 func TestNextRunRemovesWhatAKilledRunLeft(t *testing.T) {
