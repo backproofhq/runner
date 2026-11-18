@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"filippo.io/age"
+	"filippo.io/age/armor"
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/moby/moby/client"
 
@@ -157,6 +158,10 @@ func TestAgentRunsJobsFromStorageToResult(t *testing.T) {
 		t.Fatalf("create client: %v", err)
 	}
 
+	runnerIdentity, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatalf("create runner key: %v", err)
+	}
 	salt := randomID(t) + randomID(t) + randomID(t)
 	secrets := map[string]string{
 		"BP_SRC_PROD_DB_S3_ACCESS_KEY": storage.accessKey,
@@ -172,6 +177,7 @@ func TestAgentRunsJobsFromStorageToResult(t *testing.T) {
 			WorkDir:     runner.workDir,
 			Lookup:      func(key string) (string, bool) { value, ok := secrets[key]; return value, ok },
 			SourcesFile: "/nonexistent/sources.env",
+			RunnerKey:   config.NewSecret(runnerIdentity.String()),
 		}),
 		Logger:       logger,
 		Concurrency:  1,
@@ -251,6 +257,64 @@ func TestAgentRunsJobsFromStorageToResult(t *testing.T) {
 		}
 	})
 
+	t.Run("keys sealed for this runner", func(t *testing.T) {
+		backupKey, err := age.GenerateX25519Identity()
+		if err != nil {
+			t.Fatalf("create backup key: %v", err)
+		}
+		storage.put(t, "sealed/backup.dump.age", encodeAge(t, backupKey.Recipient(), readFixture(t, dumps.healthy.custom)))
+
+		assigned := agentJob(t, 5, storage, "SEALED_DB", "sealed/", false, emptyChecks())
+		bundle := sealBundle(t, runnerIdentity.Recipient(), map[string]any{
+			"version":       1,
+			"s3_access_key": storage.accessKey,
+			"s3_secret_key": storage.secretKey,
+			"name_salt":     salt,
+			"age_identity":  backupKey.String(),
+		})
+		assigned.SealedBundle = &bundle
+		backproof.submit(assigned)
+
+		result, body := backproof.waitForResult(t, assigned.Id.String())
+
+		if result.Status != api.JobResultStatusPass {
+			t.Fatalf("result = %s (%v): %v", result.Status, result.ReasonCode, result.Reason)
+		}
+		if *result.Backup.Encryption != api.BackupDetailsEncryptionAge {
+			t.Errorf("encryption = %s, want age", *result.Backup.Encryption)
+		}
+		for _, secret := range []string{storage.secretKey, backupKey.String(), salt} {
+			if strings.Contains(body, secret) {
+				t.Error("the result contains a sealed key")
+			}
+		}
+	})
+
+	t.Run("keys sealed for another runner", func(t *testing.T) {
+		stranger, err := age.GenerateX25519Identity()
+		if err != nil {
+			t.Fatalf("create other key: %v", err)
+		}
+		assigned := agentJob(t, 6, storage, "SEALED_DB", "sealed/", false, emptyChecks())
+		bundle := sealBundle(t, stranger.Recipient(), map[string]any{
+			"version":       1,
+			"s3_access_key": storage.accessKey,
+			"s3_secret_key": storage.secretKey,
+			"name_salt":     salt,
+		})
+		assigned.SealedBundle = &bundle
+		backproof.submit(assigned)
+
+		result, _ := backproof.waitForResult(t, assigned.Id.String())
+
+		if result.Status != api.JobResultStatusError || *result.ReasonCode != "missing_credentials" || result.FailedStage != nil {
+			t.Errorf("result = %s (%v), want an error before the job starts", result.Status, result.ReasonCode)
+		}
+		if !strings.Contains(*result.Reason, "SEALED_DB") {
+			t.Errorf("reason %q does not name the source", *result.Reason)
+		}
+	})
+
 	t.Run("source without credentials", func(t *testing.T) {
 		assigned := agentJob(t, 4, storage, "OTHER_DB", "prod/", true, emptyChecks())
 		backproof.submit(assigned)
@@ -267,6 +331,24 @@ func TestAgentRunsJobsFromStorageToResult(t *testing.T) {
 
 	runner.assertNothingLeft(t)
 	runner.assertNoWorkFiles(t)
+}
+
+// sealBundle builds a sealed bundle in the format of SealedBundleContents.
+func sealBundle(t *testing.T, recipient age.Recipient, contents map[string]any) string {
+	t.Helper()
+	plain, err := json.Marshal(contents)
+	if err != nil {
+		t.Fatalf("encode bundle: %v", err)
+	}
+	var sealed bytes.Buffer
+	armored := armor.NewWriter(&sealed)
+	if _, err := armored.Write(encodeAge(t, recipient, plain)); err != nil {
+		t.Fatalf("armor bundle: %v", err)
+	}
+	if err := armored.Close(); err != nil {
+		t.Fatalf("armor bundle: %v", err)
+	}
+	return sealed.String()
 }
 
 // sleepingCopy makes a real dump take the given time to restore.
@@ -288,7 +370,7 @@ type agentProcess struct {
 }
 
 // startAgentProcess runs the real binary, so the test covers how it handles signals.
-func startAgentProcess(t *testing.T, apiURL string, storage *testStorage) *agentProcess {
+func startAgentProcess(t *testing.T, apiURL string, identity *age.X25519Identity) *agentProcess {
 	t.Helper()
 	binary := filepath.Join(t.TempDir(), "backproof")
 	build := exec.CommandContext(t.Context(), "go", "build", "-o", binary, "./cmd/backproof") //nolint:gosec // The output path is the test's own temp directory.
@@ -297,10 +379,6 @@ func startAgentProcess(t *testing.T, apiURL string, storage *testStorage) *agent
 		t.Fatalf("go build: %v\n%s", err, output)
 	}
 
-	identity, err := age.GenerateX25519Identity()
-	if err != nil {
-		t.Fatalf("create runner key: %v", err)
-	}
 	runnerID, err := crypto.RunnerID(config.NewSecret(identity.String()))
 	if err != nil {
 		t.Fatalf("derive runner id: %v", err)
@@ -326,8 +404,6 @@ func startAgentProcess(t *testing.T, apiURL string, storage *testStorage) *agent
 		config.EnvRunnerKey+"="+identity.String(),
 		config.EnvAPIURL+"="+apiURL,
 		config.EnvWorkDir+"="+workDir,
-		"BP_SRC_PROD_DB_S3_ACCESS_KEY="+storage.accessKey,
-		"BP_SRC_PROD_DB_S3_SECRET_KEY="+storage.secretKey,
 	)
 	if err := command.Start(); err != nil {
 		t.Fatalf("start agent: %v", err)
@@ -383,9 +459,21 @@ func startSignalTest(t *testing.T, seconds int) (*agentAPI, *agentProcess, api.J
 	server := httptest.NewServer(backproof)
 	t.Cleanup(server.Close)
 
+	// The binary gets no local secrets, so these tests also prove it opens sealed keys.
+	identity, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatalf("create runner key: %v", err)
+	}
 	assigned := agentJob(t, 1, storage, "PROD_DB", "prod/", true, emptyChecks())
+	bundle := sealBundle(t, identity.Recipient(), map[string]any{
+		"version":       1,
+		"s3_access_key": storage.accessKey,
+		"s3_secret_key": storage.secretKey,
+		"name_salt":     randomID(t) + randomID(t) + randomID(t),
+	})
+	assigned.SealedBundle = &bundle
 	backproof.submit(assigned)
-	process := startAgentProcess(t, server.URL, storage)
+	process := startAgentProcess(t, server.URL, identity)
 
 	deadline := time.Now().Add(2 * time.Minute)
 	for {

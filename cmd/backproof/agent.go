@@ -66,6 +66,7 @@ func newAgentCommand(stderr io.Writer, lookup config.LookupFunc) *cobra.Command 
 					DiskMargin:  cfg.DiskMargin,
 					Lookup:      settings,
 					SourcesFile: config.SourcesEnvFile,
+					RunnerKey:   cfg.RunnerKey,
 				}),
 				Logger:       logger,
 				Concurrency:  cfg.Concurrency,

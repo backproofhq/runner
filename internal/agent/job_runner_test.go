@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"filippo.io/age"
+	"filippo.io/age/armor"
 	"github.com/getkin/kin-openapi/openapi3"
 
 	"github.com/backproofhq/runner/internal/api"
@@ -240,4 +243,149 @@ func TestJobRunnerReportsAnInvalidSecretsFile(t *testing.T) {
 	if strings.Contains(*got.Reason, canary) {
 		t.Error("the reason contains a line from the secrets file")
 	}
+}
+
+// sealFor builds a bundle the way the dashboard does. The test in test/seal_interop_test.go proves
+// that bundles from the real @backproof/seal package open the same way.
+func sealFor(t *testing.T, recipient age.Recipient, contents map[string]any) string {
+	t.Helper()
+	plain, err := json.Marshal(contents)
+	if err != nil {
+		t.Fatalf("encode bundle: %v", err)
+	}
+	var sealed bytes.Buffer
+	armored := armor.NewWriter(&sealed)
+	writer, err := age.Encrypt(armored, recipient)
+	if err != nil {
+		t.Fatalf("seal bundle: %v", err)
+	}
+	if _, err := writer.Write(plain); err != nil {
+		t.Fatalf("seal bundle: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("seal bundle: %v", err)
+	}
+	if err := armored.Close(); err != nil {
+		t.Fatalf("seal bundle: %v", err)
+	}
+	return sealed.String()
+}
+
+func TestJobSecrets(t *testing.T) {
+	runner, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatalf("create runner key: %v", err)
+	}
+	stranger, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatalf("create other key: %v", err)
+	}
+	runnerKey := config.NewSecret(runner.String())
+	salt := strings.Repeat("s", 32)
+	contents := map[string]any{
+		"version": 1, "s3_access_key": "sealed-access", "s3_secret_key": "sealed-secret", "name_salt": salt,
+		"age_identity": "sealed-age", "gpg_key": "sealed-gpg", "gpg_passphrase": "sealed-passphrase",
+	}
+	forRunner := sealFor(t, runner.Recipient(), contents)
+	forStranger := sealFor(t, stranger.Recipient(), contents)
+	completeLocal := config.SourceSecrets{
+		S3AccessKey: config.NewSecret("local-access"),
+		S3SecretKey: config.NewSecret("local-secret"),
+		NameSalt:    config.NewSecret("local-salt"),
+	}
+
+	withBundle := func(bundle string) api.Job {
+		assigned := testJob(t, 1)
+		assigned.SealedBundle = &bundle
+		return assigned
+	}
+
+	t.Run("sealed keys are used", func(t *testing.T) {
+		got, failure := jobSecrets(config.SourceSecrets{}, withBundle(forRunner), runnerKey)
+		if failure != nil {
+			t.Fatalf("jobSecrets() failure = %v", failure)
+		}
+		if got.S3AccessKey.Reveal() != "sealed-access" || got.S3SecretKey.Reveal() != "sealed-secret" || got.NameSalt.Reveal() != salt {
+			t.Error("the storage keys and salt did not come from the bundle")
+		}
+		if got.AgeIdentity.Reveal() != "sealed-age" || got.GPGKey.Reveal() != "sealed-gpg" || got.GPGPassphrase.Reveal() != "sealed-passphrase" {
+			t.Error("the decryption keys did not come from the bundle")
+		}
+	})
+
+	t.Run("local secrets take precedence", func(t *testing.T) {
+		local := completeLocal
+		local.GPGKey = config.NewSecret("local-gpg")
+		got, failure := jobSecrets(local, withBundle(forRunner), runnerKey)
+		if failure != nil {
+			t.Fatalf("jobSecrets() failure = %v", failure)
+		}
+		if got.S3AccessKey.Reveal() != "local-access" || got.S3SecretKey.Reveal() != "local-secret" || got.NameSalt.Reveal() != "local-salt" {
+			t.Error("the sealed keys replaced local secrets")
+		}
+		if got.GPGKey.Reveal() != "local-gpg" || got.GPGPassphrase.IsSet() {
+			t.Error("a local GPG key was combined with the sealed passphrase")
+		}
+		if got.AgeIdentity.Reveal() != "sealed-age" {
+			t.Error("a key that isn't set locally did not come from the bundle")
+		}
+	})
+
+	t.Run("half a storage key pair is never mixed", func(t *testing.T) {
+		got, failure := jobSecrets(config.SourceSecrets{S3AccessKey: config.NewSecret("local-access")}, withBundle(forRunner), runnerKey)
+		if failure != nil {
+			t.Fatalf("jobSecrets() failure = %v", failure)
+		}
+		if got.S3AccessKey.Reveal() != "sealed-access" || got.S3SecretKey.Reveal() != "sealed-secret" {
+			t.Error("the storage key pair was mixed from two places")
+		}
+	})
+
+	t.Run("sealed for another runner", func(t *testing.T) {
+		_, failure := jobSecrets(config.SourceSecrets{}, withBundle(forStranger), runnerKey)
+		if failure == nil || failure.Status != job.StatusError || failure.Code != "missing_credentials" {
+			t.Fatalf("failure = %+v, want missing credentials", failure)
+		}
+		if !strings.Contains(failure.Reason, "PROD_DB") {
+			t.Errorf("reason %q does not name the source", failure.Reason)
+		}
+	})
+
+	t.Run("complete local secrets don't need the bundle", func(t *testing.T) {
+		for name, bundle := range map[string]string{"another runner": forStranger, "damaged": "not a bundle"} {
+			got, failure := jobSecrets(completeLocal, withBundle(bundle), runnerKey)
+			if failure != nil {
+				t.Errorf("%s: failure = %v", name, failure)
+			}
+			if got.S3AccessKey.Reveal() != "local-access" {
+				t.Errorf("%s: local secrets were not used", name)
+			}
+		}
+	})
+
+	t.Run("damaged bundle", func(t *testing.T) {
+		_, failure := jobSecrets(config.SourceSecrets{}, withBundle("not a bundle"), runnerKey)
+		if failure == nil || failure.Status != job.StatusError || failure.Code != "sealed_keys_invalid" {
+			t.Errorf("failure = %+v, want unreadable sealed keys", failure)
+		}
+	})
+
+	t.Run("unusable runner key", func(t *testing.T) {
+		_, failure := jobSecrets(config.SourceSecrets{}, withBundle(forRunner), config.NewSecret("not-a-key"))
+		if failure == nil || failure.Status != job.StatusError || failure.Code != "invalid_runner_key" {
+			t.Errorf("failure = %+v, want an unusable runner key", failure)
+		}
+	})
+
+	t.Run("failures never contain keys", func(t *testing.T) {
+		for _, bundle := range []string{forStranger, "not a bundle"} {
+			_, failure := jobSecrets(config.SourceSecrets{}, withBundle(bundle), runnerKey)
+			if failure == nil {
+				t.Fatal("jobSecrets() succeeded without keys")
+			}
+			if strings.Contains(failure.Reason, runner.String()) || strings.Contains(failure.Reason, "sealed-secret") {
+				t.Errorf("reason %q contains a key", failure.Reason)
+			}
+		}
+	})
 }
