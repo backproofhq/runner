@@ -51,6 +51,7 @@ func newRootCommand(stdout, stderr io.Writer, lookup config.LookupFunc) *cobra.C
 		runCmd,
 		stub("register", "Register this runner with an install token"),
 		stub("doctor", "Check this runner's setup"),
+		newRestoreCommand(stdout, stderr, lookup),
 		newVersionCommand(),
 	)
 	return root
