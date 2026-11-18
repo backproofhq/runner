@@ -14,7 +14,7 @@ info:
     **Compatibility.** Changes within v1 are additions only. Fields are never renamed, removed or
     retyped, so clients must ignore fields they don't recognise.
 
-    **Isolation.** A token only reaches its own team's data. Asking for another team's job returns
+    **Isolation.** A token only reaches its own workspace's data. Asking for another workspace's job returns
     `404`, so the API doesn't reveal that the job exists.
 servers:
   - url: https://api.backproof.dev
@@ -223,7 +223,7 @@ components:
           schema:
             $ref: "#/components/schemas/Error"
     NotFound:
-      description: The job doesn't exist for this runner's team.
+      description: The job doesn't exist in this runner's workspace.
       content:
         application/json:
           schema:
@@ -358,7 +358,7 @@ components:
           nullable: true
           maxLength: 1048576
           description: |
-            An ASCII-armored age file sealed for this team's runners. It decrypts to
+            An ASCII-armored age file sealed for this workspace's runners. It decrypts to
             `SealedBundleContents`. It is null when the source uses local secrets.
     Source:
       type: object
@@ -367,7 +367,7 @@ components:
         id:
           type: string
           pattern: "^[A-Z][A-Z0-9_]{0,62}$"
-          description: Unique within a team. Local secrets use it, as in `BP_SRC_PROD_DB_S3_ACCESS_KEY`.
+          description: Unique within a workspace. Local secrets use it, as in `BP_SRC_PROD_DB_S3_ACCESS_KEY`.
           example: PROD_DB
         endpoint:
           type: string
