@@ -10,10 +10,13 @@ import (
 	"github.com/backproofhq/runner/internal/job"
 )
 
+const (
+	exactRows     = `(xpath('/row/count/text()', query_to_xml(format('SELECT count(*) FROM %I.%I', n.nspname, c.relname), false, true, '')))[1]::text::bigint`
+	estimatedRows = `greatest(c.reltuples, 0)::bigint`
+)
+
 // Partitions are left out because counting a partitioned table already includes their rows.
-const tablesQuery = `
-SELECT n.nspname, c.relname,
-       (xpath('/row/count/text()', query_to_xml(format('SELECT count(*) FROM %I.%I', n.nspname, c.relname), false, true, '')))[1]::text::bigint
+const tablesFrom = `
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE c.relkind IN ('r', 'p')
@@ -23,14 +26,19 @@ WHERE c.relkind IN ('r', 'p')
   AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')
 ORDER BY 1, 2`
 
-// Tables counts the rows of every restored table.
-func (i *Instance) Tables(ctx context.Context) ([]job.TableCount, error) {
+// Tables counts the rows of every restored table, or estimates them for very large tables.
+func (i *Instance) Tables(ctx context.Context, estimate bool) ([]job.TableCount, error) {
+	// NUL separators keep unusual table names from breaking the parsing.
+	command := []string{"psql", "-X", "-q", "-A", "-t", "-z", "-0", "-v", "ON_ERROR_STOP=1", "-U", superuser, "-d", database}
+	rows := exactRows
+	if estimate {
+		command = append(command, "-c", "ANALYZE")
+		rows = estimatedRows
+	}
+	command = append(command, "-c", "SELECT n.nspname, c.relname, "+rows+tablesFrom)
+
 	var output bytes.Buffer
-	code, err := i.exec(ctx, docker.ExecSpec{
-		// NUL separators keep unusual table names from breaking the parsing.
-		Cmd:    []string{"psql", "-X", "-q", "-A", "-t", "-z", "-0", "-v", "ON_ERROR_STOP=1", "-U", superuser, "-d", database, "-c", tablesQuery},
-		Stdout: &output,
-	})
+	code, err := i.exec(ctx, docker.ExecSpec{Cmd: command, Stdout: &output})
 	if err != nil {
 		return nil, dockerFailure(err)
 	}

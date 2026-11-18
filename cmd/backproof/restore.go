@@ -42,7 +42,7 @@ func newRestoreCommand(stdout, stderr io.Writer, lookup config.LookupFunc) *cobr
 
 			logger := newLogger(stderr, cfg.LogLevel)
 			limits := docker.Limits{MemoryBytes: cfg.MemoryLimitBytes, NanoCPUs: cfg.CPULimitNanos}
-			result := job.RunLocal(cmd.Context(), postgres.New(client, limits), logger, hex.EncodeToString(id), file)
+			result := job.RunLocal(cmd.Context(), postgres.New(client, limits), logger, hex.EncodeToString(id), file, job.Checks{})
 
 			encoder := json.NewEncoder(stdout)
 			encoder.SetIndent("", "  ")

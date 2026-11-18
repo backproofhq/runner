@@ -39,17 +39,19 @@ type Engine interface {
 type Instance interface {
 	Major() int
 	Restore(ctx context.Context, dump Dump) error
-	Tables(ctx context.Context) ([]TableCount, error)
+	Tables(ctx context.Context, estimate bool) ([]TableCount, error)
+	LatestTimestamp(ctx context.Context, check TimestampCheck) (TimestampReading, error)
 }
 
 // RunLocal tests a backup file on this machine and always removes what it created.
-func RunLocal(ctx context.Context, engine Engine, logger *slog.Logger, jobID, path string) (result Result) {
+func RunLocal(ctx context.Context, engine Engine, logger *slog.Logger, jobID, path string, checks Checks) (result Result) {
 	result = Result{
 		SchemaVersion: schemaVersion,
 		Status:        StatusPass,
 		Backup:        Backup{File: filepath.Base(path)},
 		Stages:        []StageTiming{},
 		Tables:        []TableCount{},
+		Checks:        []CheckResult{},
 	}
 
 	if err := engine.Ready(ctx); err != nil {
@@ -83,6 +85,9 @@ func RunLocal(ctx context.Context, engine Engine, logger *slog.Logger, jobID, pa
 	if err != nil {
 		result.stop(ctx, logger, StageDecompress, err)
 		return result
+	}
+	if !checks.BackupTime.IsZero() {
+		result.Backup.Time = checks.BackupTime.UTC()
 	}
 
 	var version Version
@@ -118,12 +123,25 @@ func RunLocal(ctx context.Context, engine Engine, logger *slog.Logger, jobID, pa
 	result.addVersionNotes(version)
 
 	err = result.timed(StageCheck, func() error {
-		tables, err := instance.Tables(ctx)
+		tables, err := instance.Tables(ctx, checks.EstimateRows)
 		if err != nil {
 			return err
 		}
 		result.Tables = tables
-		return nil
+
+		var reading *TimestampReading
+		if checks.LatestTimestamp != nil {
+			latest, err := instance.LatestTimestamp(ctx, *checks.LatestTimestamp)
+			if err != nil {
+				return err
+			}
+			reading = &latest
+		}
+		result.Checks = evaluateChecks(checks, tables, reading, result.Backup.Time)
+		if len(checks.Baseline) == 0 {
+			result.Notes = append(result.Notes, "There is no earlier run to compare with, so row counts were recorded without being judged.")
+		}
+		return firstFailure(result.Checks)
 	})
 	if err != nil {
 		result.stop(ctx, logger, StageCheck, err)
@@ -150,6 +168,7 @@ func inspectDump(path string, backup *Backup) (Dump, error) {
 		return Dump{}, unreadable(fmt.Errorf("%s is not a regular file", filepath.Base(path)))
 	}
 	backup.SizeBytes = info.Size()
+	backup.Time = info.ModTime().UTC()
 
 	format, err := archive.Sniff(file)
 	if err != nil {

@@ -3,6 +3,7 @@ package job
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/backproofhq/runner/internal/archive"
 )
@@ -50,6 +51,7 @@ type Result struct {
 	Backup        Backup        `json:"backup"`
 	Stages        []StageTiming `json:"stages"`
 	Tables        []TableCount  `json:"tables"`
+	Checks        []CheckResult `json:"checks"`
 	Notes         []string      `json:"notes,omitempty"`
 }
 
@@ -57,6 +59,7 @@ type Result struct {
 type Backup struct {
 	File            string         `json:"file"`
 	SizeBytes       int64          `json:"size_bytes"`
+	Time            time.Time      `json:"time,omitzero"`
 	Format          archive.Format `json:"format,omitempty"`
 	PostgresVersion string         `json:"postgres_version,omitempty"`
 	PostgresMajor   int            `json:"postgres_major,omitempty"`

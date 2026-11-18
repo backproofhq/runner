@@ -32,8 +32,8 @@ func TestDumpsFromEverySupportedMajorRestore(t *testing.T) {
 				format archive.Format
 				path   string
 			}{
-				{archive.FormatPlain, dumps.plain},
-				{archive.FormatCustom, dumps.custom},
+				{archive.FormatPlain, dumps.healthy.plain},
+				{archive.FormatCustom, dumps.healthy.custom},
 			}
 			for _, test := range formats {
 				t.Run(string(test.format), func(t *testing.T) {
@@ -75,8 +75,8 @@ func TestDumpsFromEverySupportedMajorRestore(t *testing.T) {
 				wantStage job.Stage
 				wantCode  string
 			}{
-				{"truncated_plain", truncatedCopy(t, dumps.plain), job.StageDecompress, "truncated_backup"},
-				{"truncated_custom", truncatedCopy(t, dumps.custom), job.StageRestore, "restore_failed"},
+				{"truncated_plain", truncatedCopy(t, dumps.healthy.plain), job.StageDecompress, "truncated_backup"},
+				{"truncated_custom", truncatedCopy(t, dumps.healthy.custom), job.StageRestore, "restore_failed"},
 			}
 			for _, test := range truncated {
 				t.Run(test.name, func(t *testing.T) {
