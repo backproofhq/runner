@@ -1,0 +1,694 @@
+openapi: 3.0.3
+info:
+  title: Backproof Runner API
+  version: 1.0.0
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+  description: |
+    The contract between the Backproof runner and the Backproof API.
+
+    The runner only makes outbound HTTPS calls. Backup files, row contents, SQL from a dump and
+    readable secrets never pass through this API.
+
+    **Compatibility.** Changes within v1 are additions only. Fields are never renamed, removed or
+    retyped, so clients must ignore fields they don't recognise.
+
+    **Isolation.** A token only reaches its own team's data. Asking for another team's job returns
+    `404`, so the API doesn't reveal that the job exists.
+servers:
+  - url: https://api.backproof.dev
+security:
+  - runnerToken: []
+tags:
+  - name: runners
+    description: Registration and check-ins
+  - name: jobs
+    description: Running a claimed job
+paths:
+  /v1/runners/register:
+    post:
+      tags: [runners]
+      operationId: registerRunner
+      summary: Trade an install token for a runner credential
+      description: |
+        An install token works once and expires one hour after it is created. Only the runner's
+        public key is sent. Its private key never leaves the runner.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterRequest"
+      responses:
+        "201":
+          description: The runner is registered. The token is only returned here.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RegisterResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/runners/poll:
+    post:
+      tags: [runners]
+      operationId: pollRunner
+      summary: Check in and ask for work
+      description: |
+        Records the check-in and claims the oldest due job this runner may take. A claimed job has
+        a 10-minute lease, which heartbeats renew. If the lease runs out, the job is marked
+        interrupted and queued again, at most twice.
+
+        The version and polling details are response headers because a `204` response has no body.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PollRequest"
+      responses:
+        "200":
+          description: A job was claimed for this runner.
+          headers:
+            Backproof-Latest-Version:
+              $ref: "#/components/headers/LatestVersion"
+            Backproof-Min-Version:
+              $ref: "#/components/headers/MinVersion"
+            Backproof-Next-Poll-After:
+              $ref: "#/components/headers/NextPollAfter"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+        "204":
+          description: No job is due for this runner.
+          headers:
+            Backproof-Latest-Version:
+              $ref: "#/components/headers/LatestVersion"
+            Backproof-Min-Version:
+              $ref: "#/components/headers/MinVersion"
+            Backproof-Next-Poll-After:
+              $ref: "#/components/headers/NextPollAfter"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "426":
+          description: |
+            The runner is below the minimum supported version. The check-in is recorded, but the
+            runner gets no jobs until it is updated.
+          headers:
+            Backproof-Latest-Version:
+              $ref: "#/components/headers/LatestVersion"
+            Backproof-Min-Version:
+              $ref: "#/components/headers/MinVersion"
+            Backproof-Next-Poll-After:
+              $ref: "#/components/headers/NextPollAfter"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/jobs/{id}/heartbeat:
+    post:
+      tags: [jobs]
+      operationId: heartbeatJob
+      summary: Renew the job's lease and report the current stage
+      description: The runner sends a heartbeat every 60 seconds while it works on a job.
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HeartbeatRequest"
+      responses:
+        "200":
+          description: The lease was renewed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HeartbeatResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/LeaseLost"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+  /v1/jobs/{id}/result:
+    post:
+      tags: [jobs]
+      operationId: submitJobResult
+      summary: Report the outcome of a job
+      description: |
+        Sending the same result again is safe and returns `202`, so the runner can retry after a
+        network failure.
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/JobResult"
+      responses:
+        "202":
+          description: The result was accepted.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/LeaseLost"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+components:
+  securitySchemes:
+    runnerToken:
+      type: http
+      scheme: bearer
+      description: The runner token. The server stores only a hash of it.
+  parameters:
+    JobId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+  headers:
+    LatestVersion:
+      description: The newest stable runner version.
+      required: true
+      schema:
+        type: string
+        example: 1.2.3
+    MinVersion:
+      description: The oldest runner version the API supports.
+      required: true
+      schema:
+        type: string
+        example: 1.0.0
+    NextPollAfter:
+      description: Seconds to wait before the next poll, before adding jitter.
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+        example: 30
+  responses:
+    BadRequest:
+      description: The request doesn't match this contract.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: The token is missing, invalid, expired, already used or revoked.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: The job doesn't exist for this runner's team.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    LeaseLost:
+      description: This runner no longer holds the job, so it must stop working on it.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    TooManyRequests:
+      description: The rate limit was reached.
+      headers:
+        Retry-After:
+          description: Seconds to wait before trying again.
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+  schemas:
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: A stable code for programs.
+          example: update_required
+        message:
+          type: string
+          description: Says what happened and what to do next. Safe to show in the runner's log.
+          example: This runner is too old to receive jobs. Update it with the install script.
+    RegisterRequest:
+      type: object
+      required: [install_token, name, public_key, os, arch]
+      properties:
+        install_token:
+          type: string
+          minLength: 1
+          maxLength: 256
+          description: The one-time token from the dashboard's Add runner page.
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: The name shown in the dashboard.
+        public_key:
+          type: string
+          pattern: "^age1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{58}$"
+          description: The runner's age X25519 public key.
+        os:
+          type: string
+          enum: [linux]
+        arch:
+          type: string
+          enum: [amd64, arm64]
+    RegisterResponse:
+      type: object
+      required: [runner_id, runner_token]
+      properties:
+        runner_id:
+          type: string
+          format: uuid
+        runner_token:
+          type: string
+          minLength: 1
+          description: The long-lived, revocable token for all other calls.
+    PollRequest:
+      type: object
+      required: [version, capabilities, status]
+      properties:
+        version:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: The exact runner version.
+          example: 1.2.3
+        capabilities:
+          $ref: "#/components/schemas/Capabilities"
+        status:
+          type: string
+          enum: [idle, busy]
+    Capabilities:
+      type: object
+      required: [postgres_majors, compression, encryption]
+      properties:
+        postgres_majors:
+          type: array
+          description: The Postgres major versions this runner can restore into.
+          items:
+            type: integer
+            minimum: 1
+          example: [14, 15, 16, 17, 18]
+        compression:
+          type: array
+          items:
+            $ref: "#/components/schemas/Compression"
+        encryption:
+          type: array
+          items:
+            $ref: "#/components/schemas/Encryption"
+    Compression:
+      type: string
+      enum: [gzip, zstd]
+    Encryption:
+      type: string
+      enum: [age, gpg]
+    Job:
+      type: object
+      required: [id, lease_expires_at, timeout_seconds, source, checks, sealed_bundle]
+      properties:
+        id:
+          type: string
+          format: uuid
+        lease_expires_at:
+          type: string
+          format: date-time
+        timeout_seconds:
+          type: integer
+          minimum: 1
+          description: The longest this job may run before the runner stops it.
+        source:
+          $ref: "#/components/schemas/Source"
+        checks:
+          $ref: "#/components/schemas/CheckConfig"
+        sealed_bundle:
+          type: string
+          nullable: true
+          maxLength: 1048576
+          description: |
+            An ASCII-armored age file sealed for this team's runners. It decrypts to
+            `SealedBundleContents`. It is null when the source uses local secrets.
+    Source:
+      type: object
+      required: [id, endpoint, region, bucket, prefix, pattern, expected_format, encryption, pinned_object_key, postgres_version_hint, show_table_names]
+      properties:
+        id:
+          type: string
+          pattern: "^[A-Z][A-Z0-9_]{0,62}$"
+          description: Unique within a team. Local secrets use it, as in `BP_SRC_PROD_DB_S3_ACCESS_KEY`.
+          example: PROD_DB
+        endpoint:
+          type: string
+          format: uri
+          example: https://s3.eu-central-1.amazonaws.com
+        region:
+          type: string
+          nullable: true
+          example: eu-central-1
+        bucket:
+          type: string
+          minLength: 1
+        prefix:
+          type: string
+          description: Only objects under this prefix are considered. Empty means the whole bucket.
+          example: prod/
+        pattern:
+          type: string
+          description: A glob matched against the file name. Empty matches every file.
+          example: "*.dump.gz"
+        expected_format:
+          type: string
+          enum: [auto, plain, custom]
+          description: What the user expects. The runner still detects the real format from the file.
+        encryption:
+          type: string
+          enum: [none, age, gpg]
+          description: What the user expects. The runner still detects encryption from the file.
+        pinned_object_key:
+          type: string
+          nullable: true
+          description: Test this exact backup instead of the newest one.
+        postgres_version_hint:
+          type: integer
+          nullable: true
+          minimum: 1
+          description: The Postgres major to use when the backup doesn't say which version made it.
+        show_table_names:
+          type: boolean
+          description: When false, table names only leave the runner as hashes.
+    TableKey:
+      type: string
+      minLength: 1
+      description: |
+        Identifies a table. With `show_table_names` on, it is `schema.table`. Otherwise it is the
+        lowercase hex HMAC-SHA256 of the schema, a NUL byte and the table name, keyed with the
+        source's `name_salt`.
+      example: 3f9a2c7d0e1b4a6f8c2d5e7a9b0c1d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c
+    CheckConfig:
+      type: object
+      required: [expected_tables, baseline, tolerance_percent, table_tolerances, row_count_mode, latest_timestamp]
+      properties:
+        expected_tables:
+          type: array
+          description: Tables that must exist, as `schema.table`. Only used with `show_table_names` on.
+          items:
+            type: string
+        baseline:
+          type: array
+          description: Row counts from the last passing run. Empty on a source's first run.
+          items:
+            $ref: "#/components/schemas/TableRowCount"
+        tolerance_percent:
+          type: number
+          minimum: 0
+          description: How far a table's row count may move from the baseline.
+        table_tolerances:
+          type: array
+          description: Overrides of `tolerance_percent` for single tables.
+          items:
+            $ref: "#/components/schemas/TableTolerance"
+        row_count_mode:
+          type: string
+          enum: [exact, estimate]
+        latest_timestamp:
+          $ref: "#/components/schemas/LatestTimestampCheck"
+    TableRowCount:
+      type: object
+      required: [table_key, rows]
+      properties:
+        table_key:
+          $ref: "#/components/schemas/TableKey"
+        rows:
+          type: integer
+          format: int64
+          minimum: 0
+    TableTolerance:
+      type: object
+      required: [table_key, tolerance_percent]
+      properties:
+        table_key:
+          $ref: "#/components/schemas/TableKey"
+        tolerance_percent:
+          type: number
+          minimum: 0
+    LatestTimestampCheck:
+      type: object
+      nullable: true
+      description: The freshness check. It is null when the source doesn't use one.
+      required: [schema, table, column, max_age_seconds]
+      properties:
+        schema:
+          type: string
+          minLength: 1
+        table:
+          type: string
+          minLength: 1
+        column:
+          type: string
+          minLength: 1
+        max_age_seconds:
+          type: integer
+          format: int64
+          minimum: 1
+          description: How much older than the backup's time the newest row may be.
+    SealedBundleContents:
+      type: object
+      description: |
+        What `sealed_bundle` decrypts to. The API never sees this object. It is defined here so the
+        dashboard's sealing code and the runner agree on it.
+      required: [version, s3_access_key, s3_secret_key, name_salt]
+      properties:
+        version:
+          type: integer
+          enum: [1]
+        s3_access_key:
+          type: string
+          minLength: 1
+        s3_secret_key:
+          type: string
+          minLength: 1
+        name_salt:
+          type: string
+          minLength: 32
+          description: The random key for hashing table names. Its UTF-8 bytes are the HMAC key.
+        age_identity:
+          type: string
+          description: The age private key, if the backups use age.
+        gpg_key:
+          type: string
+          description: The GPG private key, if the backups use GPG.
+        gpg_passphrase:
+          type: string
+          description: The passphrase of the GPG key, if it has one.
+    HeartbeatRequest:
+      type: object
+      required: [stage]
+      properties:
+        stage:
+          $ref: "#/components/schemas/Stage"
+    HeartbeatResponse:
+      type: object
+      required: [lease_expires_at, cancel]
+      properties:
+        lease_expires_at:
+          type: string
+          format: date-time
+        cancel:
+          type: boolean
+          description: When true, the runner stops the job, cleans up and sends no result.
+    Stage:
+      type: string
+      enum: [resolve, preflight, download, decrypt, decompress, detect_version, restore, check, cleanup]
+    JobResult:
+      type: object
+      description: |
+        Metadata about one job. `docs/payload.md` documents every field. Reasons are short
+        summaries and never contain SQL, row contents or raw tool output.
+      required: [schema_version, status, failed_stage, reason_code, reason, backup, stages, checks, tables, notes]
+      properties:
+        schema_version:
+          type: integer
+          enum: [1]
+        status:
+          type: string
+          enum: [pass, fail, error]
+          description: "`fail` means the backup is bad. `error` means the runner couldn't do its job."
+        failed_stage:
+          type: string
+          nullable: true
+          enum: [resolve, preflight, download, decrypt, decompress, detect_version, restore, check, cleanup, null]
+        reason_code:
+          type: string
+          nullable: true
+          pattern: "^[a-z][a-z0-9_]*$"
+          example: missing_extension
+        reason:
+          type: string
+          nullable: true
+          maxLength: 1000
+        backup:
+          $ref: "#/components/schemas/BackupDetails"
+        stages:
+          type: array
+          items:
+            $ref: "#/components/schemas/StageTiming"
+        checks:
+          type: array
+          items:
+            $ref: "#/components/schemas/CheckResult"
+        tables:
+          type: array
+          description: Rows per table in the restored backup.
+          items:
+            $ref: "#/components/schemas/TableRowCount"
+        notes:
+          type: array
+          items:
+            type: string
+            maxLength: 1000
+    BackupDetails:
+      type: object
+      description: What the runner learned about the backup. Values are null until they are known.
+      required: [object_key, size_bytes, time, format, compression, encryption, postgres_version, postgres_major, version_source, restored_major]
+      properties:
+        object_key:
+          type: string
+          nullable: true
+        size_bytes:
+          type: integer
+          format: int64
+          nullable: true
+          minimum: 0
+        time:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the backup was stored.
+        format:
+          type: string
+          nullable: true
+          enum: [plain, custom, unknown, null]
+        compression:
+          type: string
+          nullable: true
+          enum: [gzip, zstd, null]
+        encryption:
+          type: string
+          nullable: true
+          enum: [age, gpg, null]
+        postgres_version:
+          type: string
+          nullable: true
+          example: "17.4"
+        postgres_major:
+          type: integer
+          nullable: true
+          minimum: 1
+        version_source:
+          type: string
+          nullable: true
+          enum: [dump, hint, default, null]
+        restored_major:
+          type: integer
+          nullable: true
+          minimum: 1
+    StageTiming:
+      type: object
+      required: [name, duration_ms]
+      properties:
+        name:
+          $ref: "#/components/schemas/Stage"
+        duration_ms:
+          type: integer
+          format: int64
+          minimum: 0
+    CheckResult:
+      type: object
+      required: [name, status, code, reason, measured, expected, tables]
+      properties:
+        name:
+          type: string
+          enum: [tables_exist, row_counts, latest_timestamp]
+        status:
+          type: string
+          enum: [pass, fail, skipped]
+        code:
+          type: string
+          nullable: true
+          pattern: "^[a-z][a-z0-9_]*$"
+        reason:
+          type: string
+          nullable: true
+          maxLength: 1000
+          description: Never contains a table name.
+        measured:
+          type: string
+          nullable: true
+          description: The measured value, such as the newest timestamp in the chosen column.
+        expected:
+          type: string
+          nullable: true
+        tables:
+          type: array
+          description: The tables that made this check fail.
+          items:
+            $ref: "#/components/schemas/TableFinding"
+    TableFinding:
+      type: object
+      required: [table_key, problem, measured_rows, expected_rows, change_percent, tolerance_percent]
+      properties:
+        table_key:
+          $ref: "#/components/schemas/TableKey"
+        problem:
+          type: string
+          enum: [missing, row_count_changed]
+        measured_rows:
+          type: integer
+          format: int64
+          nullable: true
+          minimum: 0
+        expected_rows:
+          type: integer
+          format: int64
+          nullable: true
+          minimum: 0
+        change_percent:
+          type: number
+          nullable: true
+          minimum: 0
+        tolerance_percent:
+          type: number
+          nullable: true
+          minimum: 0
