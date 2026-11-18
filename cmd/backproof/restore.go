@@ -1,11 +1,15 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
+	"syscall"
 
 	"github.com/spf13/cobra"
 
@@ -15,7 +19,11 @@ import (
 	"github.com/backproofhq/runner/internal/job"
 )
 
-const localRunnerID = "local"
+const (
+	localRunnerID = "local"
+	// An abstract socket disappears with its process, so a killed run can't leave the lock held.
+	localRestoreLock = "@backproof-local-restore"
+)
 
 func newRestoreCommand(stdout, stderr io.Writer, lookup config.LookupFunc) *cobra.Command {
 	var file string
@@ -29,6 +37,13 @@ func newRestoreCommand(stdout, stderr io.Writer, lookup config.LookupFunc) *cobr
 			if err != nil {
 				return fmt.Errorf("load settings: %w", err)
 			}
+			// Each run removes the containers of its runner label, so two runs would stop each other.
+			release, err := lockLocalRestore(cmd.Context(), localRestoreLock)
+			if err != nil {
+				return err
+			}
+			defer release()
+
 			client, err := docker.New(localRunnerID)
 			if err != nil {
 				return fmt.Errorf("connect to docker: %w", err)
@@ -64,4 +79,16 @@ func newRestoreCommand(stdout, stderr io.Writer, lookup config.LookupFunc) *cobr
 		panic(err) // The flag is defined on the line above, so this is a programming error.
 	}
 	return cmd
+}
+
+func lockLocalRestore(ctx context.Context, name string) (func(), error) {
+	var config net.ListenConfig
+	listener, err := config.Listen(ctx, "unix", name)
+	if errors.Is(err, syscall.EADDRINUSE) {
+		return nil, errors.New("another restore is already running on this machine: wait for it to finish, then try again")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lock local restore: %w", err)
+	}
+	return func() { _ = listener.Close() }, nil
 }
