@@ -154,6 +154,18 @@ func Load(lookup LookupFunc) (Config, error) {
 
 	var errs []error
 
+	if token := get(EnvToken); strings.HasPrefix(token, ciTokenPrefix) {
+		runnerToken, runnerKey, err := splitCIToken(token)
+		switch {
+		case err != nil:
+			errs = append(errs, err)
+		case cfg.RunnerKey.IsSet():
+			errs = append(errs, errCITokenWithKey)
+		default:
+			cfg.Token, cfg.RunnerKey = runnerToken, runnerKey
+		}
+	}
+
 	if raw := get(EnvAPIURL); raw != "" {
 		apiURL, err := parseAPIURL(raw)
 		if err != nil {
