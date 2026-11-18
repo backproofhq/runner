@@ -6,7 +6,7 @@ The runner is configured through environment variables. An empty variable counts
 
 | Variable | Purpose | Default | Valid values |
 | --- | --- | --- | --- |
-| `BACKPROOF_TOKEN` | Runner token | None | Secret |
+| `BACKPROOF_TOKEN` | Runner token, or a CI token from the dashboard | None | Secret |
 | `BACKPROOF_RUNNER_KEY` | The runner's private age key, created at install | None | Secret |
 | `BACKPROOF_API_URL` | Address of the Backproof API | `https://api.backproof.dev` | An `https://` address without credentials, a query or a fragment. `http://` is accepted only for `localhost` and loopback addresses, for local development |
 | `BACKPROOF_NAME` | Runner name shown in the dashboard | None | Any text |
@@ -17,7 +17,7 @@ The runner is configured through environment variables. An empty variable counts
 | `BACKPROOF_CPU_LIMIT` | CPUs each throwaway Postgres container may use | No limit | A number of `0.01` or more, such as `1.5` |
 | `BACKPROOF_DISK_MARGIN` | How many times the backup's size must be free in the work directory before it is downloaded. Leave room for decompression | `3` | A number from `1` to `1000` |
 
-CI users only set `BACKPROOF_TOKEN`.
+CI users only set `BACKPROOF_TOKEN`. A CI token has the form `bp_ci_<secret>.<age private key>`, so it also holds the runner's private key and `BACKPROOF_RUNNER_KEY` must stay unset. The runner sends Backproof only `bp_run_<secret>`. The private key stays in your CI.
 
 ## Files
 

@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -9,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"filippo.io/age"
 )
 
 func lookupFrom(env map[string]string) LookupFunc {
@@ -227,6 +230,86 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 				t.Errorf("error %q does not name %s", err, test.key)
 			}
 		})
+	}
+}
+
+func testCIToken(t *testing.T) (token, runnerToken, runnerKey string) {
+	t.Helper()
+	identity, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatalf("create runner key: %v", err)
+	}
+	secret := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x5a}, 32))
+	return "bp_ci_" + secret + "." + identity.String(), "bp_run_" + secret, identity.String()
+}
+
+func TestLoadSplitsACIToken(t *testing.T) {
+	token, wantToken, wantKey := testCIToken(t)
+
+	cfg, err := Load(lookupFrom(map[string]string{EnvToken: token + "\n"}))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got := cfg.Token.Reveal(); got != wantToken {
+		t.Error("the token sent to Backproof is not the runner token inside the CI token")
+	}
+	if got := cfg.RunnerKey.Reveal(); got != wantKey {
+		t.Error("the runner key is not the private key inside the CI token")
+	}
+}
+
+func TestLoadRejectsBadCITokens(t *testing.T) {
+	token, _, key := testCIToken(t)
+	secret, _, _ := strings.Cut(strings.TrimPrefix(token, "bp_ci_"), ".")
+
+	encoded := func(size int) string {
+		return base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x5a}, size))
+	}
+	const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+	last := strings.IndexByte(alphabet, secret[len(secret)-1])
+
+	tests := map[string]string{
+		"no key":          "bp_ci_" + secret,
+		"empty key":       "bp_ci_" + secret + ".",
+		"not an age key":  "bp_ci_" + secret + ".AGE-SECRET-KEY-1CANARY",
+		"short secret":    "bp_ci_" + encoded(31) + "." + key,
+		"long secret":     "bp_ci_" + encoded(33) + "." + key,
+		"invalid secret":  "bp_ci_" + secret[:42] + "!." + key,
+		"altered secret":  "bp_ci_" + secret[:42] + string(alphabet[last+1]) + "." + key,
+		"line in secret":  "bp_ci_" + secret[:20] + "\n" + secret[20:] + "." + key,
+		"nothing after":   "bp_ci_",
+		"two separators":  token + ".extra",
+		"secret only dot": "bp_ci_." + key,
+	}
+	for name, value := range tests {
+		t.Run(name, func(t *testing.T) {
+			_, err := Load(lookupFrom(map[string]string{EnvToken: value}))
+			if err == nil {
+				t.Fatal("Load() accepted an invalid CI token")
+			}
+			if !strings.Contains(err.Error(), EnvToken) {
+				t.Errorf("error %q does not name %s", err, EnvToken)
+			}
+			if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), key) {
+				t.Error("the error contains part of the rejected token")
+			}
+		})
+	}
+}
+
+func TestLoadRefusesACITokenWithASeparateRunnerKey(t *testing.T) {
+	token, _, _ := testCIToken(t)
+	_, _, otherKey := testCIToken(t)
+
+	_, err := Load(lookupFrom(map[string]string{EnvToken: token, EnvRunnerKey: otherKey}))
+	if err == nil {
+		t.Fatal("Load() accepted two runner keys")
+	}
+	if !strings.Contains(err.Error(), EnvRunnerKey) {
+		t.Errorf("error %q does not name %s", err, EnvRunnerKey)
+	}
+	if strings.Contains(err.Error(), otherKey) {
+		t.Error("the error contains the runner key")
 	}
 }
 
