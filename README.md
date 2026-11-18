@@ -2,7 +2,7 @@
 
 The Backproof runner proves that your latest Postgres backup actually restores. It runs in your own infrastructure, restores the backup into a throwaway container, runs checks on it and reports metadata to [Backproof](https://app.backproof.dev). Your data never leaves your machine.
 
-> **Status:** early development. There is no release yet, and only `backproof version` works.
+> **Status:** early development. There is no release yet. `backproof version` and the development command `backproof restore --file <path>` work so far.
 
 ## Documentation
 
