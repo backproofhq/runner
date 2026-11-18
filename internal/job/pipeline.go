@@ -7,10 +7,13 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/backproofhq/runner/internal/archive"
+	"github.com/backproofhq/runner/internal/config"
 )
 
 const cleanupTimeout = 2 * time.Minute
@@ -45,13 +48,108 @@ type Instance interface {
 	LatestTimestamp(ctx context.Context, check TimestampCheck) (TimestampReading, error)
 }
 
+// Object is a backup stored in a source.
+type Object struct {
+	Key          string
+	Size         int64
+	LastModified time.Time
+}
+
+// Source finds and downloads backups.
+type Source interface {
+	Latest(ctx context.Context) (Object, error)
+	Download(ctx context.Context, object Object, path string) error
+}
+
+// fetchedBackup is a backup file on this machine.
+type fetchedBackup struct {
+	path string
+	time time.Time
+}
+
 // RunLocal tests a backup file on this machine and always removes what it created.
-func RunLocal(ctx context.Context, engine Engine, logger *slog.Logger, jobID, path string, options Options) (result Result) {
+func RunLocal(ctx context.Context, engine Engine, logger *slog.Logger, jobID, path string, options Options) Result {
+	return run(ctx, engine, logger, jobID, filepath.Base(path), options, func(*Result) (fetchedBackup, bool) {
+		return fetchedBackup{path: path}, true
+	})
+}
+
+// RunSource tests the latest backup of a source and always removes what it created.
+func RunSource(ctx context.Context, engine Engine, source Source, logger *slog.Logger, jobID string, options Options) Result {
+	return run(ctx, engine, logger, jobID, "", options, func(result *Result) (fetchedBackup, bool) {
+		var object Object
+		err := result.timed(StageResolve, func() error {
+			var err error
+			object, err = source.Latest(ctx)
+			return err
+		})
+		if err != nil {
+			result.stop(ctx, logger, StageResolve, err)
+			return fetchedBackup{}, false
+		}
+		result.Backup.File = path.Base(object.Key)
+		result.Backup.ObjectKey = object.Key
+		result.Backup.SizeBytes = object.Size
+
+		err = result.timed(StagePreflight, func() error {
+			return preflight(options.WorkDir, jobID, object.Size, options.DiskMargin)
+		})
+		if err != nil {
+			result.stop(ctx, logger, StagePreflight, err)
+			return fetchedBackup{}, false
+		}
+
+		target := filepath.Join(jobDirectory(options.WorkDir, jobID), "download")
+		err = result.timed(StageDownload, func() error { return source.Download(ctx, object, target) })
+		if err != nil {
+			result.stop(ctx, logger, StageDownload, err)
+			return fetchedBackup{}, false
+		}
+		return fetchedBackup{path: target, time: object.LastModified}, true
+	})
+}
+
+// preflight refuses a download that can't fit, before any time is spent on it.
+func preflight(workDir, jobID string, size int64, margin float64) error {
+	directory := jobDirectory(workDir, jobID)
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return WorkFileFailure(err)
+	}
+	var stats syscall.Statfs_t
+	if err := syscall.Statfs(directory, &stats); err != nil {
+		return WorkFileFailure(err)
+	}
+
+	if margin == 0 {
+		margin = config.DefaultDiskMargin
+	}
+	free := float64(stats.Bavail) * float64(stats.Bsize)
+	required := float64(size) * margin
+	if free < required {
+		return RunnerError("disk_too_small", fmt.Sprintf(
+			"The work directory has %s free, but this backup needs %s. Free some space, use a larger volume or lower %s.",
+			readableSize(free), readableSize(required), config.EnvDiskMargin,
+		), nil)
+	}
+	return nil
+}
+
+func readableSize(bytes float64) string {
+	units := []string{"bytes", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"}
+	unit := 0
+	for bytes >= 1024 && unit < len(units)-1 {
+		bytes /= 1024
+		unit++
+	}
+	return fmt.Sprintf("%.1f %s", bytes, units[unit])
+}
+
+func run(ctx context.Context, engine Engine, logger *slog.Logger, jobID, file string, options Options, fetch func(*Result) (fetchedBackup, bool)) (result Result) {
 	checks := options.Checks
 	result = Result{
 		SchemaVersion: schemaVersion,
 		Status:        StatusPass,
-		Backup:        Backup{File: filepath.Base(path)},
+		Backup:        Backup{File: file},
 		Stages:        []StageTiming{},
 		Tables:        []TableCount{},
 		Checks:        []CheckResult{},
@@ -89,15 +187,23 @@ func RunLocal(ctx context.Context, engine Engine, logger *slog.Logger, jobID, pa
 		}
 	}()
 
+	backup, ok := fetch(&result)
+	if !ok {
+		return result
+	}
+
 	var dump Dump
 	err := result.timed(StageDecompress, func() error {
 		var err error
-		dump, err = prepareDump(ctx, path, jobID, options, &result.Backup)
+		dump, err = prepareDump(ctx, backup.path, jobID, options, &result.Backup)
 		return err
 	})
 	if err != nil {
 		result.stop(ctx, logger, StageDecompress, err)
 		return result
+	}
+	if checks.BackupTime.IsZero() {
+		checks.BackupTime = backup.time
 	}
 	if !checks.BackupTime.IsZero() {
 		result.Backup.Time = checks.BackupTime.UTC()
