@@ -49,7 +49,7 @@ func newRootCommand(stdout, stderr io.Writer, lookup config.LookupFunc) *cobra.C
 	root.AddCommand(
 		stub("agent", "Poll Backproof and run jobs as they come due"),
 		runCmd,
-		stub("register", "Register this runner with an install token"),
+		newRegisterCommand(stdout, lookup),
 		stub("doctor", "Check this runner's setup"),
 		newRestoreCommand(stdout, stderr, lookup),
 		newVersionCommand(),

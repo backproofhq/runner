@@ -21,11 +21,11 @@ CI users only set `BACKPROOF_TOKEN`.
 
 ## Files
 
-> **Not read yet.** The runner currently reads environment variables only. It starts reading these files when registration and agent mode are added.
+> The runner reads environment variables. `backproof register` writes `runner.env`, which is passed to the container with `--env-file`. The runner doesn't read `sources.env` yet.
 
 | File | Purpose |
 | --- | --- |
-| `/etc/backproof/runner.env` | The runner settings above, written by the install script with mode `600` |
+| `/etc/backproof/runner.env` | The runner settings above, written by `backproof register` with mode `600` |
 | `/etc/backproof/sources.env` | Optional local secrets for backup sources |
 
 ## Local secrets
