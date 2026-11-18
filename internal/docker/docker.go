@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"sort"
 	"time"
 
@@ -267,14 +268,25 @@ func (c *Container) Remove(ctx context.Context) error {
 
 // RemoveJob deletes every container and volume labelled with this runner and job.
 func (c *Client) RemoveJob(ctx context.Context, jobID string) error {
-	filters := make(client.Filters).Add("label", LabelRunner+"="+c.runnerID, LabelJob+"="+jobID)
+	return c.remove(ctx, make(client.Filters).Add("label", LabelRunner+"="+c.runnerID, LabelJob+"="+jobID), nil)
+}
 
+// RemoveOrphans deletes everything labelled with this runner, except what belongs to the given jobs.
+// Other runners on the same Docker host keep their containers.
+func (c *Client) RemoveOrphans(ctx context.Context, keepJobIDs ...string) error {
+	return c.remove(ctx, make(client.Filters).Add("label", LabelRunner+"="+c.runnerID), keepJobIDs)
+}
+
+func (c *Client) remove(ctx context.Context, filters client.Filters, keepJobIDs []string) error {
 	var errs []error
 	containers, err := c.api.ContainerList(ctx, client.ContainerListOptions{All: true, Filters: filters})
 	if err != nil {
 		errs = append(errs, fmt.Errorf("list containers: %w", err))
 	}
 	for _, item := range containers.Items {
+		if slices.Contains(keepJobIDs, item.Labels[LabelJob]) {
+			continue
+		}
 		_, err := c.api.ContainerRemove(ctx, item.ID, client.ContainerRemoveOptions{Force: true, RemoveVolumes: true})
 		if err != nil && !errdefs.IsNotFound(err) {
 			errs = append(errs, fmt.Errorf("remove container: %w", err))
@@ -286,6 +298,9 @@ func (c *Client) RemoveJob(ctx context.Context, jobID string) error {
 		errs = append(errs, fmt.Errorf("list volumes: %w", err))
 	}
 	for _, item := range volumes.Items {
+		if slices.Contains(keepJobIDs, item.Labels[LabelJob]) {
+			continue
+		}
 		_, err := c.api.VolumeRemove(ctx, item.Name, client.VolumeRemoveOptions{Force: true})
 		if err != nil && !errdefs.IsNotFound(err) {
 			errs = append(errs, fmt.Errorf("remove volume: %w", err))

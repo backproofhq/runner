@@ -33,6 +33,7 @@ type Engine interface {
 	DetectVersion(ctx context.Context, jobID string, dump Dump) (Version, error)
 	Start(ctx context.Context, jobID string, version Version) (Instance, error)
 	Cleanup(ctx context.Context, jobID string) error
+	RemoveOrphans(ctx context.Context, keepJobIDs ...string) error
 }
 
 // Instance is a throwaway database server.
@@ -59,10 +60,16 @@ func RunLocal(ctx context.Context, engine Engine, logger *slog.Logger, jobID, pa
 		return result
 	}
 
+	// A killed runner can't clean up after itself, so the next run does it.
+	removeOrphans(ctx, engine, logger, jobID)
+
 	defer func() {
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
 		defer cancel()
-		err := result.timed(StageCleanup, func() error { return engine.Cleanup(cleanupCtx, jobID) })
+		err := result.timed(StageCleanup, func() error {
+			removeOrphans(cleanupCtx, engine, logger, jobID)
+			return engine.Cleanup(cleanupCtx, jobID)
+		})
 		if err == nil {
 			return
 		}
@@ -147,6 +154,13 @@ func RunLocal(ctx context.Context, engine Engine, logger *slog.Logger, jobID, pa
 		result.stop(ctx, logger, StageCheck, err)
 	}
 	return result
+}
+
+// removeOrphans only logs failures, because leftovers from another run say nothing about this backup.
+func removeOrphans(ctx context.Context, engine Engine, logger *slog.Logger, jobID string) {
+	if err := engine.RemoveOrphans(ctx, jobID); err != nil {
+		logger.WarnContext(ctx, "remove leftover containers", slog.Any("error", err))
+	}
 }
 
 func inspectDump(path string, backup *Backup) (Dump, error) {

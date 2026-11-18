@@ -58,6 +58,14 @@ func (e *Engine) Cleanup(ctx context.Context, jobID string) error {
 	return nil
 }
 
+// RemoveOrphans removes what earlier runs left behind, except what belongs to the given jobs.
+func (e *Engine) RemoveOrphans(ctx context.Context, keepJobIDs ...string) error {
+	if err := e.docker.RemoveOrphans(ctx, keepJobIDs...); err != nil {
+		return fmt.Errorf("remove orphans: %w", err)
+	}
+	return nil
+}
+
 // DetectVersion reads the Postgres version from the dump, or falls back to the newest supported major.
 func (e *Engine) DetectVersion(ctx context.Context, jobID string, dump job.Dump) (job.Version, error) {
 	header, err := e.readHeader(ctx, jobID, dump)

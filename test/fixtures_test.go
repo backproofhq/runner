@@ -11,7 +11,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -109,8 +108,13 @@ func (r *testRunner) restore(t *testing.T, path string) job.Result {
 
 func (r *testRunner) restoreWithChecks(t *testing.T, path string, checks job.Checks) job.Result {
 	t.Helper()
+	return r.restoreWithContext(t.Context(), t, path, checks)
+}
+
+func (r *testRunner) restoreWithContext(ctx context.Context, t *testing.T, path string, checks job.Checks) job.Result {
+	t.Helper()
 	logger := slog.New(slog.DiscardHandler)
-	return job.RunLocal(t.Context(), postgres.New(r.docker, docker.Limits{}), logger, randomID(t), path, checks)
+	return job.RunLocal(ctx, postgres.New(r.docker, docker.Limits{}), logger, randomID(t), path, checks)
 }
 
 func (r *testRunner) labels(jobID string) map[string]string {
@@ -135,32 +139,6 @@ func (r *testRunner) assertNothingLeft(t *testing.T) {
 	}
 	if len(volumes.Items) != 0 {
 		t.Errorf("%d volumes left behind", len(volumes.Items))
-	}
-}
-
-// assertNoJobContainers ignores the fixture server, which outlives the restores of its dumps.
-func (r *testRunner) assertNoJobContainers(t *testing.T) {
-	t.Helper()
-	ctx := context.WithoutCancel(t.Context())
-	filters := make(client.Filters).Add("label", docker.LabelRunner+"="+r.id)
-
-	containers, err := r.api.ContainerList(ctx, client.ContainerListOptions{All: true, Filters: filters})
-	if err != nil {
-		t.Fatalf("list containers: %v", err)
-	}
-	for _, item := range containers.Items {
-		if !strings.HasPrefix(item.Labels[docker.LabelJob], fixtureJobPrefix) {
-			t.Errorf("container %s left behind by job %s", item.ID, item.Labels[docker.LabelJob])
-		}
-	}
-	volumes, err := r.api.VolumeList(ctx, client.VolumeListOptions{Filters: filters})
-	if err != nil {
-		t.Fatalf("list volumes: %v", err)
-	}
-	for _, item := range volumes.Items {
-		if !strings.HasPrefix(item.Labels[docker.LabelJob], fixtureJobPrefix) {
-			t.Errorf("volume %s left behind by job %s", item.Name, item.Labels[docker.LabelJob])
-		}
 	}
 }
 
@@ -280,7 +258,13 @@ func generateDumps(t *testing.T, runner *testRunner, major int) dumpFiles {
 			custom: copyOut(pair.custom, filepath.Base(pair.custom)),
 		}
 	}
-	return dumpFiles{healthy: copyPair(healthy), empty: copyPair(empty), extension: copyPair(extension)}
+	files := dumpFiles{healthy: copyPair(healthy), empty: copyPair(empty), extension: copyPair(extension)}
+
+	// The server is finished, and a runner sweeps up anything else carrying its label.
+	if err := runner.docker.RemoveJob(ctx, jobID); err != nil {
+		t.Fatalf("remove fixture server: %v", err)
+	}
+	return files
 }
 
 func randomID(t *testing.T) string {
