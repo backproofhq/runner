@@ -25,6 +25,7 @@ type Stage string
 
 // Pipeline stages, in the order they run.
 const (
+	StageDecrypt       Stage = "decrypt"
 	StageDecompress    Stage = "decompress"
 	StageDetectVersion Stage = "detect_version"
 	StageRestore       Stage = "restore"
@@ -61,6 +62,8 @@ type Backup struct {
 	SizeBytes       int64          `json:"size_bytes"`
 	Time            time.Time      `json:"time,omitzero"`
 	Format          archive.Format `json:"format,omitempty"`
+	Compression     string         `json:"compression,omitempty"`
+	Encryption      string         `json:"encryption,omitempty"`
 	PostgresVersion string         `json:"postgres_version,omitempty"`
 	PostgresMajor   int            `json:"postgres_major,omitempty"`
 	VersionSource   VersionSource  `json:"version_source,omitempty"`
@@ -85,7 +88,9 @@ type Failure struct {
 	Status Status
 	Code   string
 	Reason string
-	cause  error
+	// Stage overrides the running stage when one stage covers several steps.
+	Stage Stage
+	cause error
 }
 
 // Fail reports that the backup is bad.
