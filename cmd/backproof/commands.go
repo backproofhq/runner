@@ -23,28 +23,11 @@ func newRootCommand(stdout, stderr io.Writer, lookup config.LookupFunc) *cobra.C
 	root.SetOut(stdout)
 	root.SetErr(stderr)
 
-	stub := func(use, short string) *cobra.Command {
-		return &cobra.Command{
-			Use:   use,
-			Short: short,
-			Args:  cobra.NoArgs,
-			RunE: func(cmd *cobra.Command, _ []string) error {
-				cfg, err := config.Load(lookup)
-				if err != nil {
-					return fmt.Errorf("load settings: %w", err)
-				}
-				logger := newLogger(stderr, cfg.LogLevel)
-				logger.InfoContext(cmd.Context(), "command not implemented", slog.String("command", use))
-				return fmt.Errorf("the %s command is not available in this build: update to a newer runner release", use)
-			},
-		}
-	}
-
 	root.AddCommand(
 		newAgentCommand(stderr, lookup),
 		newRunCommand(stdout, stderr, lookup),
 		newRegisterCommand(stdout, lookup),
-		stub("doctor", "Check this runner's setup"),
+		newDoctorCommand(stdout, lookup),
 		newRestoreCommand(stdout, stderr, lookup),
 		newVersionCommand(),
 	)

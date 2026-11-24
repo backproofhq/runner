@@ -6,7 +6,7 @@ All notable changes to the Backproof runner are documented here. The project fol
 
 ### Added
 
-- The `backproof` command with `agent`, `run --once`, `register`, `doctor` and `version`. Only `version` works so far.
+- The `backproof` command with `agent`, `run --once`, `register`, `doctor` and `version`.
 - Validated settings from `BACKPROOF_*` environment variables, with structured JSON logs.
 - Docker image and snapshot builds for Linux on amd64 and arm64.
 - A development command, `backproof restore --file`, that restores a plain SQL or custom-format dump from Postgres 14 to 18 in a throwaway container and prints the result as JSON.
@@ -16,6 +16,7 @@ All notable changes to the Backproof runner are documented here. The project fol
 - Containers and volumes left behind by a killed run are removed the next time the runner starts.
 - `backproof run --once` runs the jobs that are due and exits with `0` when all passed, `1` when a backup failed and `2` when the runner couldn't do its job.
 - A GitLab CI template, `ci/gitlab/backproof.gitlab-ci.yml`, that runs due backup tests on a pipeline schedule.
+- `backproof doctor` checks the settings, Docker, the token, the runner's key and version, and which sources the runner has keys for. It never prints a key and exits with `2` when a check fails.
 - CI jobs need one secret: `BACKPROOF_TOKEN` accepts a CI token that also holds the runner's private key, which never leaves the job.
 - The agent opens keys sealed for it in the dashboard. Local secrets take precedence over sealed keys.
 - `backproof agent` polls Backproof for due jobs, tests the latest backup and reports the result. It finishes running jobs before it stops, and table names leave the runner hashed unless a source allows plain names.

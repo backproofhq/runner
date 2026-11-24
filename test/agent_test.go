@@ -392,10 +392,11 @@ func startAgentProcess(t *testing.T, apiURL string, identity *age.X25519Identity
 	return process
 }
 
-func buildBackproof(t *testing.T) string {
+func buildBackproof(t *testing.T, buildFlags ...string) string {
 	t.Helper()
 	binary := filepath.Join(t.TempDir(), "backproof")
-	build := exec.CommandContext(t.Context(), "go", "build", "-o", binary, "./cmd/backproof") //nolint:gosec // The output path is the test's own temp directory.
+	args := append(append([]string{"build"}, buildFlags...), "-o", binary, "./cmd/backproof")
+	build := exec.CommandContext(t.Context(), "go", args...) //nolint:gosec // The test chooses the flags, and the output path is its own temp directory.
 	build.Dir = ".."
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("go build: %v\n%s", err, output)
