@@ -18,6 +18,7 @@ All notable changes to the Backproof runner are documented here. The project fol
 - A GitLab CI template, `ci/gitlab/backproof.gitlab-ci.yml`, that runs due backup tests on a pipeline schedule.
 - `backproof doctor` checks the settings, Docker, the token, the runner's key and version, and which sources the runner has keys for. It never prints a key and exits with `2` when a check fails.
 - `scripts/install.sh` installs the runner with one command: `curl -fsSL https://get.backproof.dev | sh -s -- --token bp_inst_...`. It offers to install Docker, registers the runner, starts it and waits for its first check-in. It takes `--name`, `--version`, `--drain-timeout`, `--yes`, `--dry-run` and `--uninstall`.
+- Running the install script again updates the runner. It lets a running backup test finish, keeps the runner's settings, asks before a new major version and puts the previous version back if the new one doesn't check in.
 - CI jobs need one secret: `BACKPROOF_TOKEN` accepts a CI token that also holds the runner's private key, which never leaves the job.
 - The agent opens keys sealed for it in the dashboard. Local secrets take precedence over sealed keys.
 - `backproof agent` polls Backproof for due jobs, tests the latest backup and reports the result. It finishes running jobs before it stops, and table names leave the runner hashed unless a source allows plain names.

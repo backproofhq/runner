@@ -8,11 +8,13 @@ set -eu
 
 image_repository=backproofhq/runner
 container=backproof-runner
+previous=backproof-runner-previous
 work_volume=backproof-work
 config_dir=/etc/backproof
 runner_env=$config_dir/runner.env
 docker_socket=/var/run/docker.sock
 dashboard_url=https://app.backproof.dev
+changelog_url=https://github.com/backproofhq/runner/blob/main/CHANGELOG.md
 checkin_timeout=60
 
 token=""
@@ -209,15 +211,41 @@ check_docker() {
 }
 
 runner_container() {
-	as_root docker ps --all --quiet --filter "name=^$container\$"
+	as_root docker ps --all --quiet --filter "name=^$1\$"
 }
 
+# image_version prints the release an image holds, such as 1.2.3.
+image_version() {
+	as_root docker run --rm "$1" version | sed -n 's/^backproof \([^ ]*\) .*/\1/p'
+}
+
+# start_runner starts the runner container, or with "show" prints the command that does.
+start_runner() {
+	how=$1
+	set -- docker run --detach --name "$container" --restart unless-stopped \
+		--stop-timeout "$drain_timeout" \
+		--volume "$docker_socket:$docker_socket" \
+		--volume "$work_volume:/var/lib/backproof" \
+		--volume "$config_dir:$config_dir:ro" \
+		"$image" agent
+	if [ "$how" = show ]; then
+		show_command "$@"
+	else
+		change "$@"
+	fi
+}
+
+# wait_for_checkin returns 1, after printing backproof doctor's findings, when the new container
+# doesn't check in in time.
 wait_for_checkin() {
+	if [ "$dry_run" -eq 1 ]; then
+		say "Would wait up to $checkin_timeout seconds for the runner to check in, then print backproof doctor's findings if it doesn't."
+		return 0
+	fi
 	say "Waiting for the runner to check in with Backproof..."
 	waited=0
 	while [ "$waited" -lt "$checkin_timeout" ]; do
 		if as_root docker logs "$container" 2>&1 | grep -q '"msg":"checked in with Backproof"'; then
-			say "Runner connected. It shows in the dashboard: $dashboard_url"
 			return 0
 		fi
 		sleep 1
@@ -226,16 +254,10 @@ wait_for_checkin() {
 
 	say "The runner didn't check in within $checkin_timeout seconds. This is what backproof doctor finds:"
 	as_root docker run --rm --volume "$docker_socket:$docker_socket" --volume "$config_dir:$config_dir:ro" "$image" doctor || true
-	say "See the runner's log with: $(show_command docker logs "$container")"
-	exit 1
+	return 1
 }
 
 install_runner() {
-	docker_ready=$1
-	if [ "$docker_ready" -eq 1 ] && [ -n "$(runner_container)" ]; then
-		die "A Backproof runner is already installed on this host, and this version of the script can't update it yet. To start over, run it with --uninstall first."
-	fi
-
 	registered=0
 	if as_root test -e "$runner_env"; then
 		registered=1
@@ -243,7 +265,6 @@ install_runner() {
 		usage_error "Add --token with the install token from the dashboard's Add runner page: $dashboard_url"
 	fi
 
-	image=$image_repository:${version:-latest}
 	change docker pull "$image"
 	if [ "$dry_run" -eq 0 ]; then
 		say "Installing $(as_root docker run --rm "$image" version)"
@@ -261,22 +282,76 @@ install_runner() {
 		change docker run --rm --volume "$config_dir:$config_dir" "$@" "$image" register --token "$token"
 	fi
 
-	set -- docker run --detach --name "$container" --restart unless-stopped \
-		--stop-timeout "$drain_timeout" \
-		--volume "$docker_socket:$docker_socket" \
-		--volume "$work_volume:/var/lib/backproof" \
-		--volume "$config_dir:$config_dir:ro" \
-		"$image" agent
 	if ! ask "Start the runner container now? [Y/n]" y; then
-		say "Start it later with: $(show_command "$@")"
+		say "Start it later with: $(start_runner show)"
 		return 0
 	fi
-	change "$@"
+	start_runner run
+	if ! wait_for_checkin; then
+		say "See the runner's log with: $(show_command docker logs "$container")"
+		exit 1
+	fi
+	[ "$dry_run" -eq 1 ] || say "Runner connected. It shows in the dashboard: $dashboard_url"
+}
+
+# update_runner replaces the runner container with a new image. The old container finishes its
+# running backup test first, and comes back if the new one doesn't check in.
+update_runner() {
+	say "A Backproof runner is already installed on this host, so this run updates it. Its settings in $runner_env are kept."
+	if [ -n "$token" ] || [ -n "$name" ]; then
+		say "--token and --name only apply to new installs, so they aren't used."
+	fi
+
+	change docker pull "$image"
 	if [ "$dry_run" -eq 1 ]; then
-		say "Would wait up to $checkin_timeout seconds for the runner to check in, then print backproof doctor's findings if it doesn't."
+		say "Would stop here if the runner already runs this image, and ask before installing a new major version."
+	else
+		current_image=$(as_root docker inspect --format '{{.Image}}' "$container")
+		new_image=$(as_root docker image inspect --format '{{.Id}}' "$image")
+		current_version=$(image_version "$current_image")
+		new_version=$(image_version "$new_image")
+		if [ "$current_image" = "$new_image" ]; then
+			say "Already up to date: the runner runs $current_version."
+			if [ -z "$(as_root docker ps --quiet --filter "name=^$container\$" --filter status=running)" ]; then
+				say "It isn't running. Start it with: $(show_command docker start "$container")"
+			fi
+			return 0
+		fi
+		current_major=${current_version%%.*}
+		new_major=${new_version%%.*}
+		case $current_major$new_major in
+		'' | *[!0-9]*) ;;
+		*)
+			if [ "$new_major" -gt "$current_major" ]; then
+				say "Backproof $new_version is a new major version with breaking changes. Read what changed first: $changelog_url"
+				if ! ask "Install $new_version anyway? [y/N]" n; then
+					say "Nothing changed: the runner keeps $current_version."
+					return 0
+				fi
+			fi
+			;;
+		esac
+		say "Updating the runner from $current_version to $new_version."
+	fi
+
+	# A copy left by an update that was cut short is out of date, because the runner exists.
+	if [ -n "$(runner_container "$previous")" ]; then
+		change docker rm --force "$previous"
+	fi
+	say "Waiting up to $drain_timeout seconds for a running backup test to finish."
+	change docker stop --time "$drain_timeout" "$container"
+	change docker rename "$container" "$previous"
+	if start_runner run && wait_for_checkin; then
+		change docker rm "$previous"
+		[ "$dry_run" -eq 1 ] || say "Runner updated to $new_version and connected."
 		return 0
 	fi
-	wait_for_checkin
+
+	say "Putting the previous version back."
+	as_root docker rm --force "$container" >/dev/null 2>&1 || true
+	as_root docker rename "$previous" "$container"
+	as_root docker start "$container" >/dev/null
+	die "The update didn't work, so the runner runs $current_version again. See the new version's problem above."
 }
 
 uninstall_runner() {
@@ -287,7 +362,10 @@ uninstall_runner() {
 	fi
 
 	if [ "$docker_ready" -eq 1 ]; then
-		if [ -n "$(runner_container)" ]; then
+		if [ -n "$(runner_container "$previous")" ]; then
+			change docker rm --force "$previous"
+		fi
+		if [ -n "$(runner_container "$container")" ]; then
 			say "Stopping the runner. A running backup test may take up to $drain_timeout seconds to finish."
 			change docker stop --time "$drain_timeout" "$container"
 			change docker rm "$container"
@@ -314,20 +392,31 @@ main() {
 	check_host
 	if [ "$dry_run" -eq 1 ]; then
 		say "Dry run: nothing on this host will change."
-	elif [ "$assume_yes" -eq 0 ] && ! (: </dev/tty) 2>/dev/null; then
-		# Every run asks at least once. Stopping now keeps the install token unspent.
-		die "There is no terminal to answer prompts. Run the script in a terminal, or add --yes to accept every prompt."
 	fi
 
 	docker_ready=0
 	if check_docker; then
 		docker_ready=1
 	fi
+	existing=""
+	if [ "$docker_ready" -eq 1 ]; then
+		existing=$(runner_container "$container")
+	fi
+	image=$image_repository:${version:-latest}
+
+	# Installing and removing always ask, so stopping now keeps the install token unspent. An
+	# update only asks about a new major version, so it can run unattended.
+	if [ "$dry_run" -eq 0 ] && [ "$assume_yes" -eq 0 ] && { [ "$uninstall" -eq 1 ] || [ -z "$existing" ]; } &&
+		! (: </dev/tty) 2>/dev/null; then
+		die "There is no terminal to answer prompts. Run the script in a terminal, or add --yes to accept every prompt."
+	fi
 
 	if [ "$uninstall" -eq 1 ]; then
 		uninstall_runner "$docker_ready"
+	elif [ -n "$existing" ]; then
+		update_runner
 	else
-		install_runner "$docker_ready"
+		install_runner
 	fi
 }
 

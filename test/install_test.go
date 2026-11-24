@@ -20,19 +20,24 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"filippo.io/age"
 	"github.com/getkin/kin-openapi/openapi3"
 
 	"github.com/backproofhq/runner/internal/api"
 	"github.com/backproofhq/runner/internal/crypto"
+	"github.com/backproofhq/runner/internal/engine/postgres"
 )
 
 const (
@@ -43,18 +48,45 @@ const (
 	installVersion  = "0.1.0"
 )
 
-// installAPI stands in for Backproof during an install: it registers one runner and accepts its
-// check-ins, or rejects its token when told to.
+// installAPI stands in for Backproof during an install: it registers one runner, hands out the
+// jobs it is given and records check-ins and results. It rejects the runner's token when told to,
+// or only for some runner versions.
 type installAPI struct {
 	t            *testing.T
 	schemas      openapi3.Schemas
 	installToken string
 	runnerToken  string
 
-	mu          sync.Mutex
-	rejectToken bool
-	registered  []api.RegisterRequest
-	requests    int
+	mu             sync.Mutex
+	rejectToken    bool
+	rejectVersions []string
+	registered     []api.RegisterRequest
+	requests       int
+	queue          []api.Job
+	checkIns       []checkIn
+	results        []installResult
+}
+
+type checkIn struct {
+	version string
+	at      time.Time
+}
+
+type installResult struct {
+	status api.JobResultStatus
+	at     time.Time
+}
+
+// firstCheckIn returns when a runner version first checked in, or the zero time.
+func (s *installAPI) firstCheckIn(version string) time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, seen := range s.checkIns {
+		if seen.version == version {
+			return seen.at
+		}
+	}
+	return time.Time{}
 }
 
 func (s *installAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -83,8 +115,33 @@ func (s *installAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = io.WriteString(w, `{"code":"invalid_token","message":"This runner's token was revoked. Register the runner again with a new install token."}`)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/runners/poll":
+		var request api.PollRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			s.t.Errorf("decode check-in: %v", err)
+		}
+		if slices.Contains(s.rejectVersions, request.Version) {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = io.WriteString(w, `{"code":"invalid_token","message":"This runner's token was revoked. Register the runner again with a new install token."}`)
+			return
+		}
+		s.checkIns = append(s.checkIns, checkIn{version: request.Version, at: time.Now()})
 		w.Header().Set("Backproof-Next-Poll-After", "1")
-		w.WriteHeader(http.StatusNoContent)
+		if len(s.queue) == 0 {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next := s.queue[0]
+		s.queue = s.queue[1:]
+		_ = json.NewEncoder(w).Encode(next)
+	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/heartbeat"):
+		_, _ = fmt.Fprintf(w, `{"lease_expires_at":%q,"cancel":false}`, time.Now().Add(10*time.Minute).Format(time.RFC3339))
+	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/result"):
+		var result api.JobResult
+		if err := json.NewDecoder(r.Body).Decode(&result); err != nil {
+			s.t.Errorf("decode result: %v", err)
+		}
+		s.results = append(s.results, installResult{status: result.Status, at: time.Now()})
+		w.WriteHeader(http.StatusAccepted)
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/runners/me":
 		fingerprint := ""
 		if len(s.registered) > 0 {
@@ -100,22 +157,27 @@ func (s *installAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // backproofhq/runner from a local registry, which holds a runner built from this checkout.
 type installHost struct {
 	name   string
+	hostIP string
 	apiURL string
 	script []byte
 }
 
-func startInstallHost(t *testing.T, handler http.Handler) *installHost {
+// startInstallHost publishes a runner image for each release, and tags latest as latest.
+func startInstallHost(t *testing.T, handler http.Handler, latest string, releases ...string) *installHost {
 	t.Helper()
 	id := "bp-install-" + strings.ToLower(randomID(t))
 	labels := []string{"--label", "dev.backproof.runner=" + id, "--label", "dev.backproof.job=" + id}
 	registry := id + "-registry"
-	image := id + ":runner"
+	releases = append(releases, latest)
+	images := make([]string, 0, len(releases))
+	for _, release := range releases {
+		images = append(images, id+":"+release)
+	}
 	t.Cleanup(func() {
-		for _, args := range [][]string{
-			{"rm", "-fv", id}, {"rm", "-fv", registry}, {"volume", "rm", "-f", id}, {"network", "rm", id}, {"image", "rm", "-f", image},
-		} {
+		for _, args := range [][]string{{"rm", "-fv", id}, {"rm", "-fv", registry}, {"volume", "rm", "-f", id}, {"network", "rm", id}} {
 			_ = dockerCommand(context.Background(), args...).Run()
 		}
+		_ = dockerCommand(context.Background(), append([]string{"image", "rm", "-f"}, images...)...).Run()
 	})
 
 	// Only stdout holds the address: a first pull writes its progress to stderr.
@@ -139,7 +201,9 @@ func startInstallHost(t *testing.T, handler http.Handler) *installHost {
 	server.StartTLS()
 	t.Cleanup(server.Close)
 
-	buildRunnerImage(t, image, authority)
+	for i, release := range releases {
+		buildRunnerImage(t, images[i], release, authority)
+	}
 	hostDocker(t, append([]string{"network", "create"}, append(labels, id)...)...)
 	hostDocker(t, append([]string{"volume", "create"}, append(labels, id)...)...)
 	hostDocker(t, append(append([]string{"run", "--detach", "--name", registry, "--network", id, "--network-alias", "registry"}, labels...), registryImage)...)
@@ -151,7 +215,7 @@ func startInstallHost(t *testing.T, handler http.Handler) *installHost {
 		// at the inner Docker's bridge.
 		"--bip=10.213.0.1/24", "--default-address-pool=base=10.214.0.0/16,size=24")...)
 
-	host := &installHost{name: id}
+	host := &installHost{name: id, hostIP: hostIP}
 	deadline := time.Now().Add(2 * time.Minute)
 	for dockerCommand(t.Context(), "exec", id, "docker", "info").Run() != nil {
 		if time.Now().After(deadline) {
@@ -159,18 +223,21 @@ func startInstallHost(t *testing.T, handler http.Handler) *installHost {
 		}
 		time.Sleep(time.Second)
 	}
-	load := exec.CommandContext(t.Context(), "sh", "-c", `docker save "$1" | docker exec -i "$2" docker load`, "sh", image, id) //nolint:gosec // The test chooses both names.
-	if output, err := load.CombinedOutput(); err != nil {
-		t.Fatalf("load image: %v\n%s", err, output)
+	host.load(t, images...)
+	// The script pulls, so the runner images must come from the registry, not the host's cache.
+	for i, release := range releases {
+		tags := []string{release}
+		if release == latest {
+			tags = append(tags, "latest")
+		}
+		for _, tag := range tags {
+			mirrored := "registry:5000/backproofhq/runner:" + tag
+			host.docker(t, "tag", images[i], mirrored)
+			host.docker(t, "push", mirrored)
+			host.docker(t, "image", "rm", mirrored)
+		}
+		host.docker(t, "image", "rm", images[i])
 	}
-	// The script pulls, so the runner image must come from the registry, not the host's cache.
-	for _, tag := range []string{"latest", installVersion} {
-		mirrored := "registry:5000/backproofhq/runner:" + tag
-		host.docker(t, "tag", image, mirrored)
-		host.docker(t, "push", mirrored)
-		host.docker(t, "image", "rm", mirrored)
-	}
-	host.docker(t, "image", "rm", image)
 
 	script, err := os.ReadFile("../scripts/install.sh")
 	if err != nil {
@@ -217,11 +284,11 @@ func newTestAuthority(t *testing.T, ip string) ([]byte, tls.Certificate) {
 
 // buildRunnerImage builds the release Dockerfile with a binary from this checkout, trusting only
 // the test's certificate authority.
-func buildRunnerImage(t *testing.T, image string, authority []byte) {
+func buildRunnerImage(t *testing.T, image, release string, authority []byte) {
 	t.Helper()
 	context := t.TempDir()
 	binary := filepath.Join(context, "linux", runtime.GOARCH, "backproof")
-	build := exec.CommandContext(t.Context(), "go", "build", "-ldflags", "-X github.com/backproofhq/runner/internal/version.version="+installVersion, "-o", binary, "./cmd/backproof") //nolint:gosec // The output path is the test's own temp directory.
+	build := exec.CommandContext(t.Context(), "go", "build", "-ldflags", "-X github.com/backproofhq/runner/internal/version.version="+release, "-o", binary, "./cmd/backproof") //nolint:gosec // The output path is the test's own temp directory.
 	build.Dir = ".."
 	build.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux")
 	if output, err := build.CombinedOutput(); err != nil {
@@ -238,6 +305,15 @@ func buildRunnerImage(t *testing.T, image string, authority []byte) {
 		}
 	}
 	hostDocker(t, "build", "--quiet", "--tag", image, context)
+}
+
+// load copies images from the machine running the tests into the host's Docker.
+func (h *installHost) load(t *testing.T, images ...string) {
+	t.Helper()
+	load := exec.CommandContext(t.Context(), "sh", append([]string{"-c", `docker save "$@" | docker exec -i "$0" docker load`, h.name}, images...)...) //nolint:gosec // The test chooses every name.
+	if output, err := load.CombinedOutput(); err != nil {
+		t.Fatalf("load images: %v\n%s", err, output)
+	}
 }
 
 func (h *installHost) docker(t *testing.T, args ...string) string {
@@ -290,7 +366,7 @@ func TestInstallScriptInstallsAndRemovesTheRunner(t *testing.T) {
 		installToken: "bp_inst_" + randomID(t),
 		runnerToken:  "bp_run_" + randomID(t),
 	}
-	host := startInstallHost(t, backproof)
+	host := startInstallHost(t, backproof, installVersion)
 	token := backproof.installToken
 	requests := func() int {
 		backproof.mu.Lock()
@@ -378,12 +454,12 @@ func TestInstallScriptInstallsAndRemovesTheRunner(t *testing.T) {
 		}
 	})
 
-	t.Run("running it again doesn't register a second runner", func(t *testing.T) {
+	t.Run("running it again finds nothing to update", func(t *testing.T) {
 		code, output := host.install(t, "--token", token, "--yes")
-		if code != 1 {
-			t.Errorf("exit code = %d, want 1\n%s", code, output)
+		if code != 0 {
+			t.Errorf("exit code = %d, want 0\n%s", code, output)
 		}
-		assertContains(t, output, "already installed")
+		assertContains(t, output, "so this run updates it", "--token and --name only apply to new installs", "Already up to date: the runner runs "+installVersion+".")
 		backproof.mu.Lock()
 		defer backproof.mu.Unlock()
 		if len(backproof.registered) != 1 {
@@ -489,4 +565,175 @@ func TestInstallScriptOnAHostWithoutDocker(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestInstallScriptUpdatesTheRunner(t *testing.T) {
+	document, err := openapi3.NewLoader().LoadFromFile("../api/v1/openapi.yaml")
+	if err != nil {
+		t.Fatalf("load contract: %v", err)
+	}
+	backproof := &installAPI{
+		t:            t,
+		schemas:      document.Components.Schemas,
+		installToken: "bp_inst_" + randomID(t),
+		runnerToken:  "bp_run_" + randomID(t),
+	}
+	host := startInstallHost(t, backproof, "0.2.0", "0.1.0", "1.0.0", "1.1.0")
+
+	storage := startStorage(t)
+	fixtures := newTestRunner(t)
+	dumps := generateDumps(t, fixtures, postgres.NewestMajor)
+	storage.put(t, "slow/backup.sql", sleepingCopy(t, dumps.healthy.plain, 20))
+	endpoint, err := url.Parse(storage.endpoint)
+	if err != nil {
+		t.Fatalf("parse storage address: %v", err)
+	}
+	storage.endpoint = "http://" + host.hostIP + ":" + endpoint.Port()
+	host.load(t, "postgres:"+strconv.Itoa(postgres.NewestMajor))
+
+	inspect := func(t *testing.T, format string) string {
+		t.Helper()
+		return strings.TrimSpace(host.docker(t, "inspect", "--format", format, "backproof-runner"))
+	}
+	assertRunning := func(t *testing.T, image string) {
+		t.Helper()
+		if got := inspect(t, "{{.Config.Image}} {{.State.Running}}"); got != image+" true" {
+			t.Errorf("runner container = %q, want %q running", got, image)
+		}
+		if previous := host.docker(t, "ps", "--all", "--quiet", "--filter", "name=^backproof-runner-previous$"); strings.TrimSpace(previous) != "" {
+			t.Error("the previous runner container is left")
+		}
+	}
+	settings := func(t *testing.T) string {
+		t.Helper()
+		return hostDocker(t, "exec", host.name, "sha256sum", "/etc/backproof/runner.env")
+	}
+
+	if code, output := host.install(t, "--token", backproof.installToken, "--yes", "--version", "0.1.0"); code != 0 {
+		t.Fatalf("install exit code = %d\n%s", code, output)
+	}
+	installed := settings(t)
+
+	t.Run("an update lets the running restore finish", func(t *testing.T) {
+		backproof.mu.Lock()
+		recipient, err := age.ParseX25519Recipient(backproof.registered[0].PublicKey)
+		if err != nil {
+			backproof.mu.Unlock()
+			t.Fatalf("parse runner key: %v", err)
+		}
+		assigned := agentJob(t, 1, storage, "PROD_DB", "slow/", true, emptyChecks())
+		bundle := sealBundle(t, recipient, map[string]any{
+			"version": 1, "s3_access_key": storage.accessKey, "s3_secret_key": storage.secretKey,
+			"name_salt": randomID(t) + randomID(t) + randomID(t),
+		})
+		assigned.SealedBundle = &bundle
+		backproof.queue = append(backproof.queue, assigned)
+		backproof.mu.Unlock()
+
+		deadline := time.Now().Add(time.Minute)
+		for {
+			backproof.mu.Lock()
+			claimed := len(backproof.queue) == 0
+			backproof.mu.Unlock()
+			if claimed {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("the runner never claimed the job")
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+		// The restore sleeps for 20 seconds, so the update starts while it runs.
+		time.Sleep(3 * time.Second)
+
+		code, output := host.install(t, "--yes", "--drain-timeout", "5m")
+		if code != 0 {
+			t.Fatalf("exit code = %d\n%s", code, output)
+		}
+		assertContains(t, output,
+			"Updating the runner from 0.1.0 to 0.2.0.",
+			"Waiting up to 300 seconds for a running backup test to finish.",
+			"Runner updated to 0.2.0 and connected.",
+		)
+
+		backproof.mu.Lock()
+		results := backproof.results
+		backproof.mu.Unlock()
+		if len(results) != 1 || results[0].status != api.JobResultStatusPass {
+			t.Fatalf("results = %+v, want one pass", results)
+		}
+		if updated := backproof.firstCheckIn("0.2.0"); updated.IsZero() || !results[0].at.Before(updated) {
+			t.Errorf("0.2.0 first checked in at %v, before the old runner reported its result at %v", updated, results[0].at)
+		}
+		assertRunning(t, "backproofhq/runner:latest")
+		if settings(t) != installed {
+			t.Error("the update changed runner.env")
+		}
+	})
+
+	t.Run("running it again finds nothing to update", func(t *testing.T) {
+		code, output := host.install(t, "--yes")
+		if code != 0 {
+			t.Fatalf("exit code = %d\n%s", code, output)
+		}
+		assertContains(t, output, "Already up to date: the runner runs 0.2.0.")
+		assertRunning(t, "backproofhq/runner:latest")
+	})
+
+	t.Run("a new major version needs a yes", func(t *testing.T) {
+		code, output := host.install(t, "--version", "1.0.0")
+		if code != 1 {
+			t.Errorf("exit code = %d, want 1\n%s", code, output)
+		}
+		assertContains(t, output,
+			"Backproof 1.0.0 is a new major version with breaking changes. Read what changed first: https://github.com/backproofhq/runner/blob/main/CHANGELOG.md",
+			"There is no terminal to ask: Install 1.0.0 anyway? [y/N]",
+		)
+		assertRunning(t, "backproofhq/runner:latest")
+
+		code, output = host.install(t, "--version", "1.0.0", "--yes")
+		if code != 0 {
+			t.Fatalf("with --yes: exit code = %d\n%s", code, output)
+		}
+		assertContains(t, output, "Install 1.0.0 anyway? [y/N] yes (--yes)", "Runner updated to 1.0.0 and connected.")
+		assertRunning(t, "backproofhq/runner:1.0.0")
+	})
+
+	t.Run("a failed update puts the previous version back", func(t *testing.T) {
+		backproof.mu.Lock()
+		backproof.rejectVersions = []string{"1.1.0"}
+		backproof.mu.Unlock()
+
+		code, output := host.install(t, "--version", "1.1.0", "--yes", "--drain-timeout", "10s")
+		if code != 1 {
+			t.Errorf("exit code = %d, want 1\n%s", code, output)
+		}
+		assertContains(t, output,
+			"The runner didn't check in within 60 seconds.",
+			"Putting the previous version back.",
+			"so the runner runs 1.0.0 again",
+		)
+		assertRunning(t, "backproofhq/runner:1.0.0")
+		restored := time.Now()
+		deadline := time.Now().Add(30 * time.Second)
+		for {
+			backproof.mu.Lock()
+			last := backproof.checkIns[len(backproof.checkIns)-1]
+			backproof.mu.Unlock()
+			if last.version == "1.0.0" && last.at.After(restored) {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("the previous version never checked in again")
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+	})
+
+	if code, output := host.install(t, "--uninstall", "--yes", "--drain-timeout", "5s"); code != 0 {
+		t.Fatalf("uninstall exit code = %d\n%s", code, output)
+	}
+	if containers := host.docker(t, "ps", "--all", "--quiet"); strings.TrimSpace(containers) != "" {
+		t.Errorf("containers are left: %s", containers)
+	}
 }
