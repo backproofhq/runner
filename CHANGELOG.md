@@ -9,6 +9,7 @@ All notable changes to the Backproof runner are documented here. The project fol
 - The `backproof` command with `agent`, `run --once`, `register`, `doctor` and `version`.
 - Validated settings from `BACKPROOF_*` environment variables, with structured JSON logs.
 - Docker image and snapshot builds for Linux on amd64 and arm64.
+- `docs/install.md` covers installing, updating and removing the runner, running it from cron or CI, and verifying a download.
 - Releases publish the `backproofhq/runner` image for amd64 and arm64, binaries, `install.sh`, checksums and SBOMs. `checksums.txt` and the images are signed with cosign by the release workflow. `latest` and the short version tags move only on stable releases.
 - A development command, `backproof restore --file`, that restores a plain SQL or custom-format dump from Postgres 14 to 18 in a throwaway container and prints the result as JSON.
 - Backup checks that fail a restored backup when tables are missing, row counts move past their tolerance or the newest row is too old.
