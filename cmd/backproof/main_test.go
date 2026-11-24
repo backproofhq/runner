@@ -20,7 +20,7 @@ func TestInvalidSettingsStopTheRunnerWithoutLeakingSecrets(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := run(t.Context(), []string{"doctor"}, &stdout, &stderr, lookup)
+	code := run(t.Context(), []string{"agent"}, &stdout, &stderr, lookup)
 
 	if code != exitRunnerError {
 		t.Errorf("exit code = %d, want %d", code, exitRunnerError)
