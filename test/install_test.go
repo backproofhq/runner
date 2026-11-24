@@ -99,7 +99,6 @@ func (s *installAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // installHost is a Docker-in-Docker container that plays a fresh Linux server. Its Docker pulls
 // backproofhq/runner from a local registry, which holds a runner built from this checkout.
 type installHost struct {
-	t      *testing.T
 	name   string
 	apiURL string
 	script []byte
@@ -147,9 +146,12 @@ func startInstallHost(t *testing.T, handler http.Handler) *installHost {
 	hostDocker(t, append(append([]string{"run", "--detach", "--privileged", "--name", id, "--hostname", "build-box",
 		"--network", id, "--add-host", "host.docker.internal:host-gateway",
 		"--env", "DOCKER_TLS_CERTDIR=/certs", "--volume", id + ":/certs/client"}, labels...),
-		dockerDindImage, "--registry-mirror=http://registry:5000", "--insecure-registry=registry:5000")...)
+		dockerDindImage, "--registry-mirror=http://registry:5000", "--insecure-registry=registry:5000",
+		// Its own networks must not overlap the host's, or the host gateway address would point
+		// at the inner Docker's bridge.
+		"--bip=10.213.0.1/24", "--default-address-pool=base=10.214.0.0/16,size=24")...)
 
-	host := &installHost{t: t, name: id}
+	host := &installHost{name: id}
 	deadline := time.Now().Add(2 * time.Minute)
 	for dockerCommand(t.Context(), "exec", id, "docker", "info").Run() != nil {
 		if time.Now().After(deadline) {
@@ -164,11 +166,11 @@ func startInstallHost(t *testing.T, handler http.Handler) *installHost {
 	// The script pulls, so the runner image must come from the registry, not the host's cache.
 	for _, tag := range []string{"latest", installVersion} {
 		mirrored := "registry:5000/backproofhq/runner:" + tag
-		host.docker("tag", image, mirrored)
-		host.docker("push", mirrored)
-		host.docker("image", "rm", mirrored)
+		host.docker(t, "tag", image, mirrored)
+		host.docker(t, "push", mirrored)
+		host.docker(t, "image", "rm", mirrored)
 	}
-	host.docker("image", "rm", image)
+	host.docker(t, "image", "rm", image)
 
 	script, err := os.ReadFile("../scripts/install.sh")
 	if err != nil {
@@ -238,21 +240,21 @@ func buildRunnerImage(t *testing.T, image string, authority []byte) {
 	hostDocker(t, "build", "--quiet", "--tag", image, context)
 }
 
-func (h *installHost) docker(args ...string) string {
-	h.t.Helper()
-	return hostDocker(h.t, append([]string{"exec", h.name, "docker"}, args...)...)
+func (h *installHost) docker(t *testing.T, args ...string) string {
+	t.Helper()
+	return hostDocker(t, append([]string{"exec", h.name, "docker"}, args...)...)
 }
 
 // install pipes the script into sh, as curl does, without a terminal.
-func (h *installHost) install(args ...string) (int, string) {
-	h.t.Helper()
-	command := dockerCommand(h.t.Context(), append([]string{"exec", "-i", "--env", "BACKPROOF_API_URL=" + h.apiURL, h.name, "sh", "-s", "--"}, args...)...)
+func (h *installHost) install(t *testing.T, args ...string) (int, string) {
+	t.Helper()
+	command := dockerCommand(t.Context(), append([]string{"exec", "-i", "--env", "BACKPROOF_API_URL=" + h.apiURL, h.name, "sh", "-s", "--"}, args...)...)
 	command.Stdin = bytes.NewReader(h.script)
-	return exitCode(h.t, command)
+	return exitCode(t, command)
 }
 
-func (h *installHost) exists(path string) bool {
-	return dockerCommand(h.t.Context(), "exec", h.name, "test", "-e", path).Run() == nil
+func (h *installHost) exists(t *testing.T, path string) bool {
+	return dockerCommand(t.Context(), "exec", h.name, "test", "-e", path).Run() == nil
 }
 
 func exitCode(t *testing.T, command *exec.Cmd) (int, string) {
@@ -297,19 +299,19 @@ func TestInstallScriptInstallsAndRemovesTheRunner(t *testing.T) {
 	}
 	assertNoRunner := func(t *testing.T) {
 		t.Helper()
-		if containers := host.docker("ps", "--all", "--quiet"); strings.TrimSpace(containers) != "" {
+		if containers := host.docker(t, "ps", "--all", "--quiet"); strings.TrimSpace(containers) != "" {
 			t.Errorf("containers are left: %s", containers)
 		}
-		if volumes := host.docker("volume", "ls", "--quiet"); strings.TrimSpace(volumes) != "" {
+		if volumes := host.docker(t, "volume", "ls", "--quiet"); strings.TrimSpace(volumes) != "" {
 			t.Errorf("volumes are left: %s", volumes)
 		}
-		if host.exists("/etc/backproof") {
+		if host.exists(t, "/etc/backproof") {
 			t.Error("/etc/backproof is left")
 		}
 	}
 
 	t.Run("a dry run changes nothing", func(t *testing.T) {
-		code, output := host.install("--token", token, "--dry-run")
+		code, output := host.install(t, "--token", token, "--dry-run")
 		if code != 0 {
 			t.Fatalf("exit code = %d\n%s", code, output)
 		}
@@ -323,7 +325,7 @@ func TestInstallScriptInstallsAndRemovesTheRunner(t *testing.T) {
 		if strings.Contains(output, token) {
 			t.Errorf("the dry run printed the install token\n%s", output)
 		}
-		if images := host.docker("image", "ls", "--quiet"); strings.TrimSpace(images) != "" {
+		if images := host.docker(t, "image", "ls", "--quiet"); strings.TrimSpace(images) != "" {
 			t.Errorf("the dry run pulled images: %s", images)
 		}
 		assertNoRunner(t)
@@ -333,7 +335,7 @@ func TestInstallScriptInstallsAndRemovesTheRunner(t *testing.T) {
 	})
 
 	t.Run("without a terminal or --yes it stops before changing anything", func(t *testing.T) {
-		code, output := host.install("--token", token)
+		code, output := host.install(t, "--token", token)
 		if code != 1 {
 			t.Errorf("exit code = %d, want 1\n%s", code, output)
 		}
@@ -345,7 +347,7 @@ func TestInstallScriptInstallsAndRemovesTheRunner(t *testing.T) {
 	})
 
 	t.Run("the one-liner registers and starts the runner", func(t *testing.T) {
-		code, output := host.install("--token", token, "--yes", "--drain-timeout", "45m")
+		code, output := host.install(t, "--token", token, "--yes", "--drain-timeout", "45m")
 		if code != 0 {
 			t.Fatalf("exit code = %d\n%s", code, output)
 		}
@@ -364,20 +366,20 @@ func TestInstallScriptInstallsAndRemovesTheRunner(t *testing.T) {
 			t.Errorf("modes of /etc/backproof and runner.env = %q, want 700 and 600", mode)
 		}
 
-		settings := host.docker("inspect", "--format", "{{.HostConfig.RestartPolicy.Name}} {{.Config.StopTimeout}} {{range .Mounts}}{{.Destination}}:{{.RW}} {{end}}", "backproof-runner")
+		settings := host.docker(t, "inspect", "--format", "{{.HostConfig.RestartPolicy.Name}} {{.Config.StopTimeout}} {{range .Mounts}}{{.Destination}}:{{.RW}} {{end}}", "backproof-runner")
 		for _, want := range []string{"unless-stopped", " 2700 ", "/var/run/docker.sock:true", "/var/lib/backproof:true", "/etc/backproof:false"} {
 			if !strings.Contains(" "+settings, want) {
 				t.Errorf("runner container settings %q are missing %q", settings, want)
 			}
 		}
 		// Settings come from the read-only mount, so the token isn't in the container's configuration.
-		if env := host.docker("inspect", "--format", "{{json .Config.Env}}", "backproof-runner"); strings.Contains(env, "bp_run_") {
+		if env := host.docker(t, "inspect", "--format", "{{json .Config.Env}}", "backproof-runner"); strings.Contains(env, "bp_run_") {
 			t.Error("the runner token is in the container's environment")
 		}
 	})
 
 	t.Run("running it again doesn't register a second runner", func(t *testing.T) {
-		code, output := host.install("--token", token, "--yes")
+		code, output := host.install(t, "--token", token, "--yes")
 		if code != 1 {
 			t.Errorf("exit code = %d, want 1\n%s", code, output)
 		}
@@ -390,9 +392,9 @@ func TestInstallScriptInstallsAndRemovesTheRunner(t *testing.T) {
 	})
 
 	t.Run("uninstall removes the runner and what it left behind", func(t *testing.T) {
-		host.docker("create", "--label", "dev.backproof.runner=leftover", "--label", "dev.backproof.job=leftover", "backproofhq/runner:latest", "version")
-		host.docker("volume", "create", "--label", "dev.backproof.runner=leftover", "--label", "dev.backproof.job=leftover")
-		code, output := host.install("--uninstall", "--yes")
+		host.docker(t, "create", "--label", "dev.backproof.runner=leftover", "--label", "dev.backproof.job=leftover", "backproofhq/runner:latest", "version")
+		host.docker(t, "volume", "create", "--label", "dev.backproof.runner=leftover", "--label", "dev.backproof.job=leftover")
+		code, output := host.install(t, "--uninstall", "--yes")
 		if code != 0 {
 			t.Fatalf("exit code = %d\n%s", code, output)
 		}
@@ -405,7 +407,7 @@ func TestInstallScriptInstallsAndRemovesTheRunner(t *testing.T) {
 		backproof.rejectToken = true
 		backproof.mu.Unlock()
 
-		code, output := host.install("--token", token, "--yes", "--version", "v"+installVersion, "--name", "edge-box")
+		code, output := host.install(t, "--token", token, "--yes", "--version", "v"+installVersion, "--name", "edge-box")
 		if code != 1 {
 			t.Errorf("exit code = %d, want 1\n%s", code, output)
 		}
@@ -414,7 +416,7 @@ func TestInstallScriptInstallsAndRemovesTheRunner(t *testing.T) {
 			"fail  Backproof API: This runner's token was revoked.",
 			"docker logs backproof-runner",
 		)
-		if image := host.docker("inspect", "--format", "{{.Config.Image}}", "backproof-runner"); strings.TrimSpace(image) != "backproofhq/runner:"+installVersion {
+		if image := host.docker(t, "inspect", "--format", "{{.Config.Image}}", "backproof-runner"); strings.TrimSpace(image) != "backproofhq/runner:"+installVersion {
 			t.Errorf("runner image = %q, want backproofhq/runner:%s", image, installVersion)
 		}
 		backproof.mu.Lock()
@@ -424,7 +426,7 @@ func TestInstallScriptInstallsAndRemovesTheRunner(t *testing.T) {
 			t.Errorf("registered name = %q, want edge-box", last.Name)
 		}
 
-		if code, output := host.install("--uninstall", "--yes", "--drain-timeout", "5s"); code != 0 {
+		if code, output := host.install(t, "--uninstall", "--yes", "--drain-timeout", "5s"); code != 0 {
 			t.Fatalf("uninstall exit code = %d\n%s", code, output)
 		}
 		assertNoRunner(t)
