@@ -119,8 +119,16 @@ func startInstallHost(t *testing.T, handler http.Handler) *installHost {
 		}
 	})
 
-	resolved := hostDocker(t, "run", "--rm", "--add-host", "host.docker.internal:host-gateway", "--entrypoint", "getent", dockerCLIImage, "ahostsv4", "host.docker.internal")
-	hostIP := strings.Fields(resolved)[0]
+	// Only stdout holds the address: a first pull writes its progress to stderr.
+	resolved, err := dockerCommand(t.Context(), "run", "--rm", "--add-host", "host.docker.internal:host-gateway", "--entrypoint", "getent", dockerCLIImage, "ahostsv4", "host.docker.internal").Output()
+	if err != nil {
+		t.Fatalf("resolve the host gateway: %v", err)
+	}
+	fields := strings.Fields(string(resolved))
+	if len(fields) == 0 || net.ParseIP(fields[0]) == nil {
+		t.Fatalf("resolve the host gateway: unexpected answer %q", resolved)
+	}
+	hostIP := fields[0]
 	authority, certificate := newTestAuthority(t, hostIP)
 	listener, err := new(net.ListenConfig).Listen(t.Context(), "tcp", "0.0.0.0:0")
 	if err != nil {
