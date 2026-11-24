@@ -104,6 +104,30 @@ func (c *RunnerClient) Poll(ctx context.Context, request PollRequest) (PollResul
 	return result, nil
 }
 
+// StatusResult is what Backproof knows about this runner.
+type StatusResult struct {
+	Runner        RunnerStatus
+	LatestVersion string
+	MinVersion    string
+}
+
+// Status reads the runner's registration without checking in or claiming a job.
+func (c *RunnerClient) Status(ctx context.Context) (StatusResult, error) {
+	response, err := c.api.GetRunnerStatusWithResponse(ctx)
+	if err != nil {
+		return StatusResult{}, fmt.Errorf("reach the Backproof API at %s: %w", c.baseURL, err)
+	}
+	if response.JSON200 == nil {
+		return StatusResult{}, newHTTPError(response.HTTPResponse, response.Body)
+	}
+	headers := response.HTTPResponse.Header
+	return StatusResult{
+		Runner:        *response.JSON200,
+		LatestVersion: headers.Get("Backproof-Latest-Version"),
+		MinVersion:    headers.Get("Backproof-Min-Version"),
+	}, nil
+}
+
 // Heartbeat renews a job's lease and reports its current stage.
 func (c *RunnerClient) Heartbeat(ctx context.Context, jobID JobId, stage Stage) (HeartbeatResponse, error) {
 	response, err := c.api.HeartbeatJobWithResponse(ctx, jobID, HeartbeatRequest{Stage: stage})
