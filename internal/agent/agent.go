@@ -81,6 +81,7 @@ func (a *Agent) Run(ctx, jobs context.Context) error {
 	defer workers.Wait()
 
 	failures := 0
+	connected := false
 	for ctx.Err() == nil {
 		result, err := a.options.Client.Poll(ctx, a.pollRequest())
 		switch {
@@ -95,6 +96,11 @@ func (a *Agent) Run(ctx, jobs context.Context) error {
 			a.options.Logger.WarnContext(ctx, "check in with Backproof", slog.Any("error", err))
 			a.sleep(ctx, a.backoff(failures, problem))
 			continue
+		}
+		// The install script waits for this message to tell the user the runner is connected.
+		if !connected || failures > 0 {
+			a.options.Logger.InfoContext(ctx, "checked in with Backproof")
+			connected = true
 		}
 		failures = 0
 		a.noticeVersions(ctx, result)
