@@ -6,6 +6,7 @@ The Backproof runner proves that your latest Postgres backup actually restores. 
 
 ## Documentation
 
+- [Install](docs/install.md): install, update and remove the runner, or run it in CI
 - [Configuration](docs/config.md): the settings the runner reads
 - [Payload](docs/payload.md): everything the runner sends to Backproof
 - [Security and trust model](docs/security.md): what we promise and how the runner keeps it
