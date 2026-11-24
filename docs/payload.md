@@ -28,6 +28,12 @@ Every request also has a `User-Agent` header with the runner's version, such as 
 | `capabilities.compression` | The compression formats it can open | `["gzip", "zstd"]` |
 | `capabilities.encryption` | The encryption formats it can open | `["age", "gpg"]` |
 
+## Status checks
+
+`backproof doctor` sends one `GET /v1/runners/me`. The request has no body: Backproof identifies the runner by its token, and only the `User-Agent` header carries the runner's version. It doesn't count as a check-in and never claims a job.
+
+The answer holds the runner's name, the fingerprint of the public key Backproof holds for it, and each source's ID with whether keys are sealed for this runner. The runner compares the fingerprint with its own key. Which local secrets are set is checked on the runner and never sent.
+
 ## Heartbeats
 
 While a job runs, the runner sends `POST /v1/jobs/{id}/heartbeat` every 60 seconds.
