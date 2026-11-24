@@ -41,7 +41,7 @@ go test -tags integration ./test/...              # integration tests (needs Doc
 golangci-lint run                                 # lint
 gofmt -l .                                        # must print nothing
 shellcheck scripts/install.sh                     # install script lint
-goreleaser release --snapshot --clean             # local release build, never publishes
+goreleaser release --snapshot --clean --skip=sign # local release build, never publishes or signs
 ```
 
 All of these must pass before a pull request. Never skip, disable or weaken a test or lint rule to make a check pass.
