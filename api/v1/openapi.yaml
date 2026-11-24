@@ -115,6 +115,31 @@ paths:
                 $ref: "#/components/schemas/Error"
         "429":
           $ref: "#/components/responses/TooManyRequests"
+  /v1/runners/me:
+    get:
+      tags: [runners]
+      operationId: getRunnerStatus
+      summary: Show what Backproof knows about this runner
+      description: |
+        Lets `backproof doctor` confirm the token works and list the sources this runner has keys
+        for. It is read-only: it never claims a job and doesn't count as a check-in. Keys and
+        sealed bundles are never returned.
+      responses:
+        "200":
+          description: The runner's registration and the sources in its workspace.
+          headers:
+            Backproof-Latest-Version:
+              $ref: "#/components/headers/LatestVersion"
+            Backproof-Min-Version:
+              $ref: "#/components/headers/MinVersion"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunnerStatus"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
   /v1/jobs/{id}/heartbeat:
     post:
       tags: [jobs]
@@ -295,6 +320,39 @@ components:
           type: string
           minLength: 1
           description: The long-lived, revocable token for all other calls.
+    RunnerStatus:
+      type: object
+      required: [runner_id, name, key_fingerprint, sources]
+      properties:
+        runner_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: The name shown in the dashboard.
+        key_fingerprint:
+          type: string
+          description: The fingerprint of the public key Backproof holds for this runner, to compare with the runner's own key.
+          example: SHA256:4m4FJEkQ1+4bsddQHkzIqik856xUVFF2r27Q/fZPLno
+        sources:
+          type: array
+          description: Every source in this runner's workspace.
+          items:
+            $ref: "#/components/schemas/RunnerSource"
+    RunnerSource:
+      type: object
+      required: [id, has_sealed_keys]
+      properties:
+        id:
+          type: string
+          pattern: "^[A-Z][A-Z0-9_]{0,62}$"
+          description: The source ID, also used in local secret names such as `BP_SRC_PROD_DB_S3_ACCESS_KEY`.
+          example: PROD_DB
+        has_sealed_keys:
+          type: boolean
+          description: Whether keys entered in the dashboard are sealed for this runner.
     PollRequest:
       type: object
       required: [version, capabilities, status]
