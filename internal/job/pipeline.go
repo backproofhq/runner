@@ -115,15 +115,14 @@ func preflight(workDir, jobID string, size int64, margin float64) error {
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return WorkFileFailure(err)
 	}
-	var stats syscall.Statfs_t
-	if err := syscall.Statfs(directory, &stats); err != nil {
-		return WorkFileFailure(err)
+	free, err := freeSpace(directory)
+	if err != nil {
+		return err
 	}
 
 	if margin == 0 {
 		margin = config.DefaultDiskMargin
 	}
-	free := float64(stats.Bavail) * float64(stats.Bsize)
 	required := float64(size) * margin
 	if free < required {
 		return RunnerError("disk_too_small", fmt.Sprintf(
@@ -132,6 +131,14 @@ func preflight(workDir, jobID string, size int64, margin float64) error {
 		), nil)
 	}
 	return nil
+}
+
+func freeSpace(directory string) (float64, error) {
+	var stats syscall.Statfs_t
+	if err := syscall.Statfs(directory, &stats); err != nil {
+		return 0, WorkFileFailure(err)
+	}
+	return float64(stats.Bavail) * float64(stats.Bsize), nil
 }
 
 func readableSize(bytes float64) string {

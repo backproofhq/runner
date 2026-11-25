@@ -59,6 +59,11 @@ func TestSniff(t *testing.T) {
 		{"binary pgp to a passphrase", []byte{0xc3, 0x0d, 0x04, 0x09, 0x03}, FormatPGP},
 		{"binary data that resembles pgp", []byte{0xc1, 0x4c, 0x7f, 0x00, 0xcd}, FormatUnknown},
 		{"binary data", []byte{0x00, 0x01, 0x02, 0xff}, FormatUnknown},
+		{"zip", []byte("PK\x03\x04\x14\x00"), FormatZip},
+		{"empty zip", []byte("PK\x05\x06\x00\x00"), FormatZip},
+		{"posix tar", append(make([]byte, 257), "ustar\x0000"...), FormatTar},
+		{"gnu tar", append(make([]byte, 257), "ustar  \x00"...), FormatTar},
+		{"binary data shorter than a tar header", make([]byte, 200), FormatUnknown},
 		{"text that turns binary", append([]byte(strings.Repeat("a", 100)), 0x00), FormatUnknown},
 	}
 	for _, test := range tests {
