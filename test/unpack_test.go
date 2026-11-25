@@ -3,6 +3,8 @@
 package test
 
 import (
+	"archive/tar"
+	"archive/zip"
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
@@ -208,6 +210,80 @@ func TestCompressedAndEncryptedDumpsRestore(t *testing.T) {
 					})
 				}
 			}
+		})
+	}
+}
+
+func encodeZip(t *testing.T, files map[string][]byte) []byte {
+	t.Helper()
+	var output bytes.Buffer
+	writer := zip.NewWriter(&output)
+	for name, data := range files {
+		file, err := writer.Create(name)
+		if err != nil {
+			t.Fatalf("zip: %v", err)
+		}
+		if _, err := file.Write(data); err != nil {
+			t.Fatalf("zip: %v", err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("zip: %v", err)
+	}
+	return output.Bytes()
+}
+
+func encodeTar(t *testing.T, files map[string][]byte) []byte {
+	t.Helper()
+	var output bytes.Buffer
+	writer := tar.NewWriter(&output)
+	for name, data := range files {
+		if err := writer.WriteHeader(&tar.Header{Name: name, Typeflag: tar.TypeReg, Mode: 0o600, Size: int64(len(data))}); err != nil {
+			t.Fatalf("tar: %v", err)
+		}
+		if _, err := writer.Write(data); err != nil {
+			t.Fatalf("tar: %v", err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("tar: %v", err)
+	}
+	return output.Bytes()
+}
+
+func TestDumpsInsideArchivesRestore(t *testing.T) {
+	runner := newTestRunner(t)
+	dumps := generateDumps(t, runner, postgres.NewestMajor)
+	custom := readFixture(t, dumps.healthy.custom)
+	plain := readFixture(t, dumps.healthy.plain)
+	settings := []byte("services: {}\n")
+
+	tests := []struct {
+		name            string
+		data            []byte
+		wantFormat      string
+		wantCompression string
+	}{
+		// The layout of Dokploy's web server backup.
+		{"zip", encodeZip(t, map[string][]byte{"database.sql": custom, "filesystem/compose.yml": settings}), "custom", ""},
+		{"tar_gz", encodeGzip(t, encodeTar(t, map[string][]byte{"var/backups/nightly/db.sql": plain, "var/backups/nightly/compose.yml": settings})), "plain", "gzip"},
+		{"zip_of_gzip", encodeZip(t, map[string][]byte{"backups/db.dump.gz": encodeGzip(t, custom)}), "custom", "gzip"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result := runner.restore(t, writeFixture(t, "backup.bin", test.data))
+
+			if result.Status != job.StatusPass {
+				t.Fatalf("result = %s at %q (%s): %s", result.Status, result.Stage, result.ReasonCode, result.Reason)
+			}
+			if string(result.Backup.Format) != test.wantFormat || result.Backup.Compression != test.wantCompression {
+				t.Errorf("backup = %s with %q, want %s with %q", result.Backup.Format, result.Backup.Compression, test.wantFormat, test.wantCompression)
+			}
+			if len(result.Tables) != len(fixtureTables) {
+				t.Errorf("restored %d tables, want %d", len(result.Tables), len(fixtureTables))
+			}
+			runner.assertNothingLeft(t)
+			runner.assertNoWorkFiles(t)
 		})
 	}
 }

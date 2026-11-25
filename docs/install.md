@@ -15,6 +15,16 @@ The Backproof runner restores your latest Postgres backup in a throwaway contain
 - Outbound HTTPS to `api.backproof.dev`, your backup storage and Docker Hub. [security.md](security.md#network-access) lists every destination. Installing also fetches the script from `get.backproof.dev` and GitHub.
 - Free disk space of about three times your largest backup. `BACKPROOF_DISK_MARGIN` in [config.md](config.md) changes the factor.
 
+## Backups it reads
+
+- Dumps made by `pg_dump` from Postgres 14 to 18, in plain SQL or custom format.
+- Compressed with gzip or zstd, encrypted with age or GPG, or both.
+- Inside a zip or tar archive, such as Dokploy's web server backup, also when the archive is compressed or encrypted.
+
+The runner tells formats apart by their contents, not their file names. In an archive, it looks through every folder for the one Postgres dump, and counts plain SQL only when it starts with the header `pg_dump` writes. It writes nothing else from the archive to disk. An encrypted zip is the exception: a zip can only be read as a whole file, so it's decrypted into the work volume first and deleted once the dump is out.
+
+An archive with several dumps is an error, because the runner can't tell which one to test. Password-protected zips aren't supported. Encrypt with age or GPG instead.
+
 ## Install on a server
 
 Open **Add runner** in the [dashboard](https://app.backproof.dev) and copy the command. It holds a one-time install token, which works once and expires after an hour:

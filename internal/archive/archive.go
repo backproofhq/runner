@@ -24,6 +24,8 @@ const (
 	FormatZstd    Format = "zstd"
 	FormatAge     Format = "age"
 	FormatPGP     Format = "pgp"
+	FormatZip     Format = "zip"
+	FormatTar     Format = "tar"
 )
 
 const (
@@ -32,6 +34,7 @@ const (
 	plainFooterWindow = 4 * 1024
 	plainDumpHeader   = "-- PostgreSQL database dump"
 	plainDumpFooter   = "-- PostgreSQL database dump complete"
+	tarMagicOffset    = 257
 )
 
 var signatures = []struct {
@@ -44,6 +47,9 @@ var signatures = []struct {
 	{[]byte("age-encryption.org/"), FormatAge},
 	{[]byte("-----BEGIN AGE ENCRYPTED FILE-----"), FormatAge},
 	{[]byte("-----BEGIN PGP MESSAGE-----"), FormatPGP},
+	{[]byte("PK\x03\x04"), FormatZip},
+	// An empty zip has only its end record.
+	{[]byte("PK\x05\x06"), FormatZip},
 }
 
 // Sniff detects the format from the first bytes of r, because file extensions can't be trusted.
@@ -68,6 +74,10 @@ func SniffBytes(sample []byte) Format {
 	}
 	if isBinaryPGP(sample) {
 		return FormatPGP
+	}
+	// POSIX and GNU tar both write "ustar" here. Older tar files without it are rare.
+	if bytes.HasPrefix(sample[min(len(sample), tarMagicOffset):], []byte("ustar")) {
+		return FormatTar
 	}
 	if bytes.IndexByte(sample, 0) >= 0 {
 		return FormatUnknown
@@ -130,6 +140,12 @@ func Decompress(format Format, compressed io.Reader) (io.ReadCloser, error) {
 	}
 }
 
+// HasPlainDumpHeader reports whether a plain SQL file starts the way pg_dump writes it. Archives
+// hold many text files, so only these count as dumps there.
+func HasPlainDumpHeader(sample []byte) bool {
+	return bytes.Contains(sample, []byte(plainDumpHeader))
+}
+
 // PlainDumpTruncated reports whether a pg_dump plain file lost its end. psql exits successfully on
 // such a file, because it can't tell a short file from a finished one. Only pg_dump's own output
 // has the footer, so SQL files without its header are never reported.
@@ -138,7 +154,7 @@ func PlainDumpTruncated(file io.ReaderAt, size int64) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("read backup header: %w", err)
 	}
-	if !bytes.Contains(head, []byte(plainDumpHeader)) {
+	if !HasPlainDumpHeader(head) {
 		return false, nil
 	}
 

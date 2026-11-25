@@ -4,6 +4,14 @@ All notable changes to the Backproof runner are documented here. The project fol
 
 ## Unreleased
 
+## 0.1.0-beta.2 - 2026-11-25
+
+A pre-release for beta testers. Install it with `--version 0.1.0-beta.2`. `latest` doesn't point at it.
+
+### Added
+
+- Backups can be zip or tar archives, also compressed or encrypted. The runner finds the one Postgres dump in any folder by its contents, such as `database.sql` in Dokploy's web server backup, and unpacks nothing else.
+
 ## 0.1.0-beta.1 - 2026-11-24
 
 The first pre-release of the Backproof runner. It proves the release pipeline and lets beta testers install on purpose with `--version 0.1.0-beta.1`. `latest` doesn't point at it.

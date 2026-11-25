@@ -1,6 +1,8 @@
 package job
 
 import (
+	"archive/tar"
+	"archive/zip"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -175,14 +177,70 @@ func gpgArmored(t *testing.T, entity *openpgp.Entity, data []byte) []byte {
 	return output.Bytes()
 }
 
+type archiveEntry struct {
+	name string
+	data []byte
+}
+
+func zipped(t *testing.T, entries ...archiveEntry) []byte {
+	t.Helper()
+	var output bytes.Buffer
+	writer := zip.NewWriter(&output)
+	for _, entry := range entries {
+		file, err := writer.Create(entry.name)
+		if err != nil {
+			t.Fatalf("zip: %v", err)
+		}
+		if _, err := file.Write(entry.data); err != nil {
+			t.Fatalf("zip: %v", err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("zip: %v", err)
+	}
+	return output.Bytes()
+}
+
+// tarred adds a folder and a link that points out of the archive, which unpacking must ignore.
+func tarred(t *testing.T, entries ...archiveEntry) []byte {
+	t.Helper()
+	var output bytes.Buffer
+	writer := tar.NewWriter(&output)
+	for _, header := range []*tar.Header{
+		{Name: "backups/", Typeflag: tar.TypeDir, Mode: 0o755},
+		{Name: "backups/escape", Typeflag: tar.TypeSymlink, Linkname: "../../../etc/passwd"},
+	} {
+		if err := writer.WriteHeader(header); err != nil {
+			t.Fatalf("tar: %v", err)
+		}
+	}
+	for _, entry := range entries {
+		if err := writer.WriteHeader(&tar.Header{Name: entry.name, Typeflag: tar.TypeReg, Mode: 0o600, Size: int64(len(entry.data))}); err != nil {
+			t.Fatalf("tar: %v", err)
+		}
+		if _, err := writer.Write(entry.data); err != nil {
+			t.Fatalf("tar: %v", err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("tar: %v", err)
+	}
+	return output.Bytes()
+}
+
 func unpack(t *testing.T, data []byte, secrets config.SourceSecrets) (Dump, Backup, error) {
+	t.Helper()
+	return unpackIn(t, t.TempDir(), data, secrets)
+}
+
+func unpackIn(t *testing.T, workDir string, data []byte, secrets config.SourceSecrets) (Dump, Backup, error) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "backup.bin")
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatalf("write backup: %v", err)
 	}
 	var backup Backup
-	dump, err := prepareDump(t.Context(), path, "job", Options{WorkDir: t.TempDir(), SourceID: "LOCAL", Secrets: secrets}, &backup)
+	dump, err := prepareDump(t.Context(), path, "job", Options{WorkDir: workDir, SourceID: "LOCAL", Secrets: secrets}, &backup)
 	return dump, backup, err
 }
 
@@ -248,9 +306,108 @@ func TestPrepareDumpOpensEveryLayerCombination(t *testing.T) {
 	}
 }
 
+// rawZip stores data as it is, under a header that may say otherwise.
+func rawZip(t *testing.T, header zip.FileHeader, data []byte) []byte {
+	t.Helper()
+	var output bytes.Buffer
+	writer := zip.NewWriter(&output)
+	header.Name = "db.sql"
+	header.Method = zip.Store
+	header.CompressedSize64 = uint64(len(data))
+	if header.UncompressedSize64 == 0 {
+		header.UncompressedSize64 = uint64(len(data))
+	}
+	file, err := writer.CreateRaw(&header)
+	if err != nil {
+		t.Fatalf("zip: %v", err)
+	}
+	if _, err := file.Write(data); err != nil {
+		t.Fatalf("zip: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("zip: %v", err)
+	}
+	return output.Bytes()
+}
+
+func TestPrepareDumpFindsTheDumpInsideArchives(t *testing.T) {
+	keys := newTestKeys(t)
+	dump := []byte(plainDump)
+	custom := []byte("PGDMP\x01\x10\x00\x04\x08\x01\x01\x01")
+	recipient := keys.ageIdentity.Recipient()
+	secrets := config.SourceSecrets{AgeIdentity: config.NewSecret(keys.ageIdentity.String())}
+	const otherFile = "ENCRYPTION_KEY=never-unpacked"
+	// Dokploy's web server backup: the dump, plus a copy of /etc/dokploy.
+	dokploy := func(database []byte) []byte {
+		return zipped(t,
+			archiveEntry{"database.sql", database},
+			archiveEntry{"filesystem/", nil},
+			archiveEntry{"filesystem/.env", []byte(otherFile)},
+			archiveEntry{"filesystem/traefik/traefik.yml", []byte("entryPoints: {}\n")},
+			archiveEntry{"filesystem/applications/app/code/setup.sql", []byte("CREATE TABLE t (id int);\n")},
+		)
+	}
+
+	tests := []struct {
+		name            string
+		data            []byte
+		want            []byte
+		wantFormat      archive.Format
+		wantCompression string
+		wantEncryption  string
+	}{
+		{name: "Dokploy web server backup", data: dokploy(custom), want: custom, wantFormat: archive.FormatCustom},
+		{name: "dump deep in folders, without an extension", data: zipped(t, archiveEntry{"a/b/c/d/latest", dump}, archiveEntry{"a/notes.txt", []byte(otherFile)}), want: dump, wantFormat: archive.FormatPlain},
+		{name: "compressed dump inside a zip", data: zipped(t, archiveEntry{"db/backup.sql.gz", gzipped(t, dump)}), want: dump, wantFormat: archive.FormatPlain, wantCompression: "gzip"},
+		{name: "encrypted dump inside a zip", data: zipped(t, archiveEntry{"db/backup.age", ageEncrypted(t, recipient, dump)}), want: dump, wantFormat: archive.FormatPlain, wantEncryption: "age"},
+		{name: "tar", data: tarred(t, archiveEntry{"backups/readme.txt", []byte(otherFile)}, archiveEntry{"backups/db.sql", dump}), want: dump, wantFormat: archive.FormatPlain},
+		{name: "tar inside gzip", data: gzipped(t, tarred(t, archiveEntry{"backups/db.dump", custom}, archiveEntry{"backups/.env", []byte(otherFile)})), want: custom, wantFormat: archive.FormatCustom, wantCompression: "gzip"},
+		{name: "tar inside zstd", data: zstandard(t, tarred(t, archiveEntry{"db.sql", dump})), want: dump, wantFormat: archive.FormatPlain, wantCompression: "zstd"},
+		{name: "encrypted zip", data: ageEncrypted(t, recipient, dokploy(custom)), want: custom, wantFormat: archive.FormatCustom, wantEncryption: "age"},
+		{name: "zip inside a compressed tar", data: gzipped(t, tarred(t, archiveEntry{"nightly/backup.zip", dokploy(dump)})), want: dump, wantFormat: archive.FormatPlain, wantCompression: "gzip"},
+		{name: "dump next to an unrelated archive", data: tarred(t, archiveEntry{"uploads.zip", zipped(t, archiveEntry{"a.txt", []byte(otherFile)})}, archiveEntry{"db.sql", dump}), want: dump, wantFormat: archive.FormatPlain},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			workDir := t.TempDir()
+			got, backup, err := unpackIn(t, workDir, test.data, secrets)
+			if err != nil {
+				t.Fatalf("prepareDump() error = %v", err)
+			}
+			if got.Format != test.wantFormat {
+				t.Errorf("format = %s, want %s", got.Format, test.wantFormat)
+			}
+			if backup.Compression != test.wantCompression || backup.Encryption != test.wantEncryption {
+				t.Errorf("layers = %q and %q, want %q and %q", backup.Compression, backup.Encryption, test.wantCompression, test.wantEncryption)
+			}
+			contents, err := os.ReadFile(got.Path)
+			if err != nil {
+				t.Fatalf("read unpacked dump: %v", err)
+			}
+			if !bytes.Equal(contents, test.want) {
+				t.Error("unpacked dump differs from the original")
+			}
+
+			err = filepath.WalkDir(workDir, func(path string, entry os.DirEntry, err error) error {
+				if err != nil || entry.IsDir() {
+					return err
+				}
+				if path != got.Path {
+					t.Errorf("left %s in the work directory besides the dump", filepath.Base(path))
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("read work directory: %v", err)
+			}
+		})
+	}
+}
+
 func TestPrepareDumpReportsWhatWentWrong(t *testing.T) {
 	keys := newTestKeys(t)
 	dump := []byte(plainDump)
+	bigDump := []byte(strings.Replace(plainDump, "CREATE TABLE t (id int);\n", strings.Repeat("INSERT INTO t VALUES (1);\n", 400), 1))
 	recipient := keys.ageIdentity.Recipient()
 	right := config.SourceSecrets{AgeIdentity: config.NewSecret(keys.ageIdentity.String()), GPGKey: config.NewSecret(keys.gpgPrivate)}
 
@@ -276,6 +433,18 @@ func TestPrepareDumpReportsWhatWentWrong(t *testing.T) {
 		{"truncated dump inside gzip", gzipped(t, dump[:len(dump)/2]), config.SourceSecrets{}, StatusFail, "truncated_backup", ""},
 		{"binary data inside gzip", gzipped(t, []byte{0x00, 0x01, 0x02}), config.SourceSecrets{}, StatusFail, "unknown_format", ""},
 		{"endless gzip layers", gzipped(t, gzipped(t, gzipped(t, gzipped(t, gzipped(t, gzipped(t, dump)))))), config.SourceSecrets{}, StatusFail, "unknown_format", ""},
+		{"archive without a dump", zipped(t, archiveEntry{"filesystem/traefik.yml", []byte("entryPoints: {}\n")}), config.SourceSecrets{}, StatusFail, "no_dump_in_archive", ""},
+		{"archive with SQL that pg_dump didn't write", tarred(t, archiveEntry{"schema.sql", []byte("CREATE TABLE t (id int);\n")}), config.SourceSecrets{}, StatusFail, "no_dump_in_archive", ""},
+		{"empty zip", zipped(t), config.SourceSecrets{}, StatusFail, "no_dump_in_archive", ""},
+		{"zip with two dumps", zipped(t, archiveEntry{"a/one.sql", dump}, archiveEntry{"b/two.sql", dump}), config.SourceSecrets{}, StatusError, "ambiguous_archive", ""},
+		{"tar with two dumps", tarred(t, archiveEntry{"one.sql", dump}, archiveEntry{"two.sql.gz", gzipped(t, dump)}), config.SourceSecrets{}, StatusError, "ambiguous_archive", ""},
+		{"archive with two archives and no dump", zipped(t, archiveEntry{"one.zip", zipped(t, archiveEntry{"db.sql", dump})}, archiveEntry{"two.tar", tarred(t)}), config.SourceSecrets{}, StatusError, "ambiguous_archive", ""},
+		// Zip passwords set this flag. archive/zip can't write real ones.
+		{"password-protected zip", rawZip(t, zip.FileHeader{Flags: 0x1}, dump), config.SourceSecrets{}, StatusError, "protected_archive", StageDecrypt},
+		{"dump bigger than the free space", rawZip(t, zip.FileHeader{UncompressedSize64: 1 << 62}, bigDump), config.SourceSecrets{}, StatusError, "disk_too_small", ""},
+		{"encrypted dump inside an archive without a key", zipped(t, archiveEntry{"db.sql.age", ageEncrypted(t, recipient, dump)}), config.SourceSecrets{}, StatusError, "missing_key", StageDecrypt},
+		{"truncated tar", tarred(t, archiveEntry{"db.sql", bigDump})[:len(bigDump)/2], config.SourceSecrets{}, StatusFail, "damaged_archive", ""},
+		{"endless archive layers", zipped(t, archiveEntry{"a.zip", zipped(t, archiveEntry{"b.zip", zipped(t, archiveEntry{"c.zip", zipped(t, archiveEntry{"d.zip", zipped(t, archiveEntry{"db.sql", dump})})})})}), config.SourceSecrets{}, StatusFail, "unknown_format", ""},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -309,6 +478,8 @@ func TestPrepareDumpDetectsDamageAtEveryLength(t *testing.T) {
 		{"age", ageEncrypted(t, recipient, dump)},
 		{"gpg", gpgEncrypted(t, keys.gpgEntity, dump)},
 		{"gzip inside age", ageEncrypted(t, recipient, gzipped(t, dump))},
+		{"zip", zipped(t, archiveEntry{"database.sql", dump})},
+		{"tar inside gzip", gzipped(t, tarred(t, archiveEntry{"db.sql", dump}))},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

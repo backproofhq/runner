@@ -19,7 +19,7 @@ import (
 
 const (
 	jobsDirectory = "jobs"
-	// Real backups are encrypted once and compressed once, so more layers mean a damaged file.
+	// Real backups have an archive, encryption and compression at most, so more layers mean a damaged file.
 	maxLayers = 4
 )
 
@@ -43,7 +43,7 @@ func jobDirectory(workDir, jobID string) string {
 	return filepath.Join(workDir, jobsDirectory, jobID)
 }
 
-// prepareDump decrypts and decompresses the backup until a Postgres dump remains. Unpacked files
+// prepareDump decrypts, decompresses and unarchives the backup until a Postgres dump remains. Unpacked files
 // go into the job's work directory, which RunLocal removes when the job ends.
 func prepareDump(ctx context.Context, path, jobID string, options Options, backup *Backup) (Dump, error) {
 	unreadable := func(err error) error {
@@ -68,6 +68,10 @@ func prepareDump(ctx context.Context, path, jobID string, options Options, backu
 
 	layers := &layerChain{}
 	defer layers.close()
+	unpacker := &unpacker{ctx: ctx, directory: jobDirectory(options.WorkDir, jobID), options: options, layers: layers}
+	current := workFile{file: file, path: path, size: info.Size()}
+	// onFile is true while source reads current directly, so a dump can be used where it is.
+	onFile := true
 	source := layers.add(&contextReader{ctx: ctx, reader: file}, unreadable)
 
 	for depth := 0; depth <= maxLayers; depth++ {
@@ -81,9 +85,10 @@ func prepareDump(ctx context.Context, path, jobID string, options Options, backu
 		backup.Format = format
 		switch format {
 		case archive.FormatCustom, archive.FormatPlain:
-			if depth == 0 {
-				return finishDump(file, info.Size(), Dump{Path: path, Format: format})
+			if onFile {
+				return finishDump(current.file, current.size, Dump{Path: current.path, Format: format})
 			}
+			defer unpacker.discard(current)
 			return writeUnpacked(buffered, layers, options.WorkDir, jobID, format)
 
 		case archive.FormatGzip, archive.FormatZstd:
@@ -94,6 +99,7 @@ func prepareDump(ctx context.Context, path, jobID string, options Options, backu
 			}
 			layers.closers = append(layers.closers, decompressed)
 			source = layers.add(decompressed, damagedArchive)
+			onFile = false
 
 		case archive.FormatAge, archive.FormatPGP:
 			backup.Encryption = string(format)
@@ -102,15 +108,29 @@ func prepareDump(ctx context.Context, path, jobID string, options Options, backu
 				return Dump{}, layers.failure(err, func(err error) error { return decryptFailure(err, format, options.SourceID) })
 			}
 			source = layers.add(decrypted, damagedEncryption)
+			onFile = false
+
+		case archive.FormatZip, archive.FormatTar:
+			entry, err := unpacker.openArchive(format, buffered, current, onFile, depth)
+			if err != nil {
+				return Dump{}, err
+			}
+			current = entry
+			onFile = true
+			source = layers.add(&contextReader{ctx: ctx, reader: entry.file}, WorkFileFailure)
 
 		case archive.FormatEmpty:
 			return Dump{}, Fail("empty_backup", "The backup file is empty. Check the job that creates your backups.")
 
 		default:
-			return Dump{}, Fail("unknown_format", "The file isn't a Postgres plain SQL or custom-format dump. Check the job that creates your backups.")
+			return Dump{}, Fail("unknown_format", "The file isn't a Postgres plain SQL or custom-format dump, or an archive that holds one. Check the job that creates your backups.")
 		}
 	}
-	return Dump{}, Fail("unknown_format", "The file has too many layers of compression or encryption. Check the job that creates your backups.")
+	return Dump{}, tooManyLayers()
+}
+
+func tooManyLayers() error {
+	return Fail("unknown_format", "The file has too many layers of archives, compression or encryption. Check the job that creates your backups.")
 }
 
 func openEncrypted(format archive.Format, encrypted io.Reader, options Options) (io.Reader, error) {
