@@ -82,9 +82,8 @@ dockers_v2:
       org.opencontainers.image.version: "{{ .Version }}"
       org.opencontainers.image.revision: "{{ .FullCommit }}"
 
-# The release workflow passes the version's section of CHANGELOG.md as the release notes.
-changelog:
-  disable: true
+# The release workflow passes the version's section of CHANGELOG.md with --release-notes, which
+# replaces the changelog generated from commits. Disabling the changelog would drop those notes too.
 
 release:
   github:
